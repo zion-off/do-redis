@@ -317,9 +317,12 @@ function translateIncrByDelta(args: string[], delta: number, cmd: string): Trans
       params: [key],
     },
     { sql: "INSERT OR IGNORE INTO keys (key, type) VALUES (?, 'string')", params: [key] },
-    { sql: "INSERT OR IGNORE INTO strings (key, value) VALUES (?, '0')", params: [key] },
     {
-      sql: "UPDATE strings SET value = CAST(CAST(value AS INTEGER) + ? AS INTEGER) WHERE key = ? RETURNING value",
+      sql: "INSERT OR IGNORE INTO strings (key, value) SELECT ?, '0' WHERE EXISTS (SELECT 1 FROM keys WHERE key = ? AND type = 'string')",
+      params: [key, key],
+    },
+    {
+      sql: "UPDATE strings SET value = CAST(CAST(value AS INTEGER) + ? AS INTEGER) WHERE key = ? AND CAST(CAST(value AS INTEGER) AS TEXT) = value RETURNING value",
       params: [delta, key],
     },
   ];

@@ -104,6 +104,7 @@ describe.skipIf(!Database)("end-to-end behavior on real sqlite", () => {
       expect(db.command(["INCR", "s"])).toEqual({
         error: "ERR value is not an integer or out of range",
       });
+      expect(db.run(["GET", "s"])).toBe("abc");
       expect(db.command(["INCRBY", "n", "abc"])).toEqual({
         error: "ERR value is not an integer or out of range",
       });
@@ -124,6 +125,7 @@ describe.skipIf(!Database)("end-to-end behavior on real sqlite", () => {
       expect(db.command(["INCR", "h"])).toEqual({
         error: "WRONGTYPE Operation against a key holding the wrong kind of value",
       });
+      expect(db.run(["HGETALL", "h"])).toEqual(["f", "v"]);
     });
 
     it("argument validation", () => {

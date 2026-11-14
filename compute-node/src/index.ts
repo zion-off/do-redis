@@ -185,7 +185,7 @@ export default {
     if (translations.length > 0) {
       try {
         pipelineResults = await stub.execPipeline(
-          translations.map((translation) => ({ statements: translation.statements }))
+          translations.map((translation) => translation.statements)
         );
       } catch (err) {
         return jsonResponse({ error: errorMessage(err) });

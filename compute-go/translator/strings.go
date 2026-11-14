@@ -290,11 +290,11 @@ func translateIncrByDelta(args []string, delta int64, cmd string) (Translation, 
 			Params: []any{key},
 		},
 		{
-			SQL:    "INSERT OR IGNORE INTO strings (key, value) VALUES (?, '0')",
-			Params: []any{key},
+			SQL:    "INSERT OR IGNORE INTO strings (key, value) SELECT ?, '0' WHERE EXISTS (SELECT 1 FROM keys WHERE key = ? AND type = 'string')",
+			Params: []any{key, key},
 		},
 		{
-			SQL:    "UPDATE strings SET value = CAST(CAST(value AS INTEGER) + ? AS INTEGER) WHERE key = ? RETURNING value",
+			SQL:    "UPDATE strings SET value = CAST(CAST(value AS INTEGER) + ? AS INTEGER) WHERE key = ? AND CAST(CAST(value AS INTEGER) AS TEXT) = value RETURNING value",
 			Params: []any{delta, key},
 		},
 	}

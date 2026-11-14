@@ -128,6 +128,15 @@ export function translateGet(args: string[]): Translation {
   };
 }
 
+// XX and KEEPTTL retype an existing key in place, so rows left over from a
+// previous non-string type must go (a plain SET gets this from the cascade).
+function clearOtherTypes(key: string): Statement[] {
+  return ["hashes", "lists", "sets"].map((table) => ({
+    sql: `DELETE FROM ${table} WHERE key = ?`,
+    params: [key],
+  }));
+}
+
 export function translateSet(args: string[]): Translation {
   if (args.length < 2) {
     throw errWrongArgs("set");
@@ -179,6 +188,7 @@ export function translateSet(args: string[]): Translation {
       }
     );
   } else if (options.xx) {
+    statements.push(...clearOtherTypes(key));
     okIndex = statements.length;
     if (options.keepTTL) {
       statements.push({
@@ -197,6 +207,7 @@ export function translateSet(args: string[]): Translation {
     });
   } else if (options.keepTTL) {
     statements.push(
+      ...clearOtherTypes(key),
       {
         sql: "UPDATE keys SET type = 'string' WHERE key = ? RETURNING key",
         params: [key],

@@ -30,8 +30,8 @@ describe("strings translator", () => {
 
   it("SET XX when key missing returns null", () => {
     const translation = translate(["SET", "k", "v", "XX"]);
-    expect(translation.statements).toHaveLength(3);
-    const results: ResultRow[][] = [[], [], []];
+    expect(translation.statements).toHaveLength(6);
+    const results: ResultRow[][] = [[], [], [], [], [], []];
     expect(translation.mapResult(results)).toBeNull();
   });
 

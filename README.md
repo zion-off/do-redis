@@ -1,4 +1,4 @@
-## meowdis
+## do-redis
 
 a free, serverless redis clone backed by cloudflare durable
 objects. drop-in replacement for upstash redis.
@@ -45,9 +45,9 @@ objects. drop-in replacement for upstash redis.
 set `AUTH_TOKEN` to a random secret string when prompted — generate one at
 [jwtsecretkeygenerator.com](https://jwtsecretkeygenerator.com/)
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/zion-off/meowdis/tree/main/meowdis)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/zion-off/do-redis/tree/main/do-redis)
 
-> **tip:** for lower latency, set a [location hint](https://developers.cloudflare.com/durable-objects/reference/data-location/#provide-a-location-hint) in `meowdis/src/index.ts` before deploying to pin the durable object to a region close to your users:
+> **tip:** for lower latency, set a [location hint](https://developers.cloudflare.com/durable-objects/reference/data-location/#provide-a-location-hint) in `do-redis/src/index.ts` before deploying to pin the durable object to a region close to your users:
 >
 > ```ts
 > const stub = env.STORAGE.get(id, { locationHint: "apac" });
@@ -56,7 +56,7 @@ set `AUTH_TOKEN` to a random secret string when prompted — generate one at
 then initialise the database:
 
 ```bash
-curl https://meowdis.example.workers.dev \
+curl https://do-redis.example.workers.dev \
   -H "Authorization: Bearer your-token" \
   -d '["INIT"]'
 ```
@@ -64,7 +64,7 @@ curl https://meowdis.example.workers.dev \
 verify it's working:
 
 ```bash
-curl https://meowdis.example.workers.dev \
+curl https://do-redis.example.workers.dev \
   -H "Authorization: Bearer your-token" \
   -d '["PING"]'                       # {"result":"PONG"}
 ```
@@ -76,7 +76,7 @@ curl https://meowdis.example.workers.dev \
 ```python
 from upstash_redis import Redis
 
-redis = Redis(url="https://meowdis.example.workers.dev", token="your-token")
+redis = Redis(url="https://do-redis.example.workers.dev", token="your-token")
 
 redis.ping()                          # 'PONG'
 redis.set("name", "clairo")           # 'OK'
@@ -89,7 +89,7 @@ redis.get("name")                     # 'clairo'
 import { Redis } from "@upstash/redis";
 
 const redis = new Redis({
-  url: "https://meowdis.example.workers.dev",
+  url: "https://do-redis.example.workers.dev",
   token: "your-token",
 });
 
@@ -102,15 +102,15 @@ await redis.get("name"); // 'clairo'
 [upstash rest api docs](https://upstash.com/docs/redis/features/restapi))
 
 ```bash
-curl https://meowdis.example.workers.dev \
+curl https://do-redis.example.workers.dev \
   -H "Authorization: Bearer your-token" \
   -d '["PING"]'                       # {"result":"PONG"}
 
-curl https://meowdis.example.workers.dev \
+curl https://do-redis.example.workers.dev \
   -H "Authorization: Bearer your-token" \
   -d '["SET", "name", "clairo"]'      # {"result":"OK"}
 
-curl https://meowdis.example.workers.dev \
+curl https://do-redis.example.workers.dev \
   -H "Authorization: Bearer your-token" \
   -d '["GET", "name"]'                # {"result":"clairo"}
 ```
@@ -121,7 +121,7 @@ curl https://meowdis.example.workers.dev \
 
 **1.** deploy the storage layer
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/zion-off/meowdis/tree/main/durable-object)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/zion-off/do-redis/tree/main/durable-object)
 
 | variable         | description                                                                                               |
 | ---------------- | --------------------------------------------------------------------------------------------------------- |
@@ -131,7 +131,7 @@ curl https://meowdis.example.workers.dev \
 
 **option a — cloudflare worker** (compute-node)
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/zion-off/meowdis/tree/main/compute-node)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/zion-off/do-redis/tree/main/compute-node)
 
 | variable     | description                                                                                               |
 | ------------ | --------------------------------------------------------------------------------------------------------- |

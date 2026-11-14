@@ -42,7 +42,7 @@ jobs:
 
   deploy:
     needs: test
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: false # deployments disabled
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -59,7 +59,7 @@ jobs:
         run: |
           cd compute-go
           GOOS=linux GOARCH=amd64 go build -o bootstrap .
-          zip meowdis-compute-go.zip bootstrap
+          zip do-redis-compute-go.zip bootstrap
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -70,10 +70,10 @@ jobs:
       - name: Deploy
         run: |
           aws lambda update-function-code \
-            --function-name meowdis-compute-go \
-            --zip-file fileb://compute-go/meowdis-compute-go.zip
+            --function-name do-redis-compute-go \
+            --zip-file fileb://compute-go/do-redis-compute-go.zip
           aws lambda wait function-updated \
-            --function-name meowdis-compute-go
+            --function-name do-redis-compute-go
 
       - name: Set environment variables
         env:
@@ -82,5 +82,5 @@ jobs:
           STORAGE_TOKEN: ${{ secrets.CLOUDFLARE_DURABLE_OBJECT_SECRET }}
         run: |
           aws lambda update-function-configuration \
-            --function-name meowdis-compute-go \
+            --function-name do-redis-compute-go \
             --environment "Variables={AUTH_TOKEN=$AUTH_TOKEN,STORAGE_ENDPOINT=$STORAGE_ENDPOINT,STORAGE_TOKEN=$STORAGE_TOKEN}"

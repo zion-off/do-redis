@@ -1,5 +1,5 @@
 {
-  "name": "meowdis-storage",
+  "name": "do-redis-storage",
   "version": "0.0.1",
   "private": true,
   "scripts": {

@@ -1,5 +1,5 @@
 {
-  "name": "meowdis",
+  "name": "do-redis",
   "main": "src/index.ts",
   "compatibility_date": "2025-06-01",
   "durable_objects": {

@@ -46,7 +46,7 @@ jobs:
 
   deploy:
     needs: test
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: false # deployments disabled
     runs-on: ubuntu-latest
     permissions:
       contents: read

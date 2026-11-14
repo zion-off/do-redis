@@ -1,5 +1,5 @@
 {
-  "name": "meowdis",
+  "name": "do-redis",
   "version": "0.0.1",
   "private": true,
   "scripts": {
@@ -11,7 +11,7 @@
   "cloudflare": {
     "bindings": {
       "AUTH_TOKEN": {
-        "description": "Bearer token for making authenticated requests to meowdis. Generate one at [jwtsecretkeygenerator.com](https://jwtsecretkeygenerator.com/)."
+        "description": "Bearer token for making authenticated requests to do-redis. Generate one at [jwtsecretkeygenerator.com](https://jwtsecretkeygenerator.com/)."
       }
     }
   },

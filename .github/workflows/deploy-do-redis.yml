@@ -1,16 +1,16 @@
-name: CI / Deploy meowdis
+name: CI / Deploy do-redis
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
-      - 'meowdis/**'
-      - '.github/workflows/deploy-meowdis.yml'
+      - 'do-redis/**'
+      - '.github/workflows/deploy-do-redis.yml'
   pull_request:
     paths:
-      - 'meowdis/**'
-      - '.github/workflows/deploy-meowdis.yml'
+      - 'do-redis/**'
+      - '.github/workflows/deploy-do-redis.yml'
 
 jobs:
   test:
@@ -31,22 +31,22 @@ jobs:
 
       - name: Install dependencies
         run: |
-          cd meowdis
+          cd do-redis
           pnpm install --frozen-lockfile
 
       - name: Lint
         run: |
-          cd meowdis
+          cd do-redis
           pnpm exec prettier --check src && pnpm exec eslint src --ext .ts --quiet
 
       - name: Test
         run: |
-          cd meowdis
+          cd do-redis
           pnpm run test
 
   deploy:
     needs: test
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: false # deployments disabled
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -64,7 +64,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          cd meowdis
+          cd do-redis
           pnpm install --frozen-lockfile
 
       - name: Deploy
@@ -72,14 +72,14 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          cd meowdis
+          cd do-redis
           pnpm run deploy
 
       - name: Set worker secrets
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          AUTH_TOKEN: ${{ secrets.MEOWDIS_AUTH_TOKEN }}
+          AUTH_TOKEN: ${{ secrets.DO_REDIS_AUTH_TOKEN }}
         run: |
-          cd meowdis
+          cd do-redis
           echo "$AUTH_TOKEN" | pnpm wrangler secret put AUTH_TOKEN

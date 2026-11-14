@@ -1,5 +1,5 @@
 {
-  "name": "meowdis-compute-node",
+  "name": "do-redis-compute-node",
   "main": "src/index.ts",
   "compatibility_date": "2025-06-01",
   "durable_objects": {
@@ -7,7 +7,7 @@
       {
         "name": "STORAGE",
         "class_name": "StorageDurableObject",
-        "script_name": "meowdis-durable-object"
+        "script_name": "do-redis-durable-object"
       }
     ]
   }

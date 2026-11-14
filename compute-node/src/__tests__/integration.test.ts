@@ -403,6 +403,132 @@ describe.skipIf(!Database)("end-to-end behavior on real sqlite", () => {
     });
   });
 
+  describe("wrong-type writes", () => {
+    const WRONGTYPE = {
+      error: "WRONGTYPE Operation against a key holding the wrong kind of value",
+    };
+
+    // One key per type, all carrying a TTL so expires_at changes are detected too.
+    const seed = (): void => {
+      db.run(["SET", "s", "str"]);
+      db.run(["HSET", "h", "f1", "v1", "f2", "v2"]);
+      db.run(["RPUSH", "l", "a", "b", "c"]);
+      db.run(["SADD", "t", "m1", "m2"]);
+      for (const key of ["s", "h", "l", "t"]) {
+        db.run(["EXPIREAT", key, FUTURE]);
+      }
+    };
+
+    const snapshot = (): unknown[] => [
+      db.rows("SELECT key, type, expires_at FROM keys ORDER BY key"),
+      db.rows("SELECT key, value FROM strings ORDER BY key"),
+      db.rows("SELECT key, field, value FROM hashes ORDER BY key, field"),
+      db.rows('SELECT key, "index", value FROM lists ORDER BY key, "index"'),
+      db.rows("SELECT key, member FROM sets ORDER BY key, member"),
+    ];
+
+    const many = (prefix: string): string[] =>
+      Array.from({ length: 150 }, (_, i) => `${prefix}${i}`);
+
+    const cases: Array<{ cmd: string[]; wrongKeys: string[] }> = [
+      { cmd: ["HSET", "KEY", "f1", "x", "new", "y"], wrongKeys: ["s", "l", "t"] },
+      {
+        cmd: ["HSET", "KEY", ...many("f").flatMap((f) => [f, "x"])],
+        wrongKeys: ["s", "l", "t"],
+      },
+      { cmd: ["HDEL", "KEY", "f1", "f2", "m1", "a"], wrongKeys: ["s", "l", "t"] },
+      { cmd: ["HDEL", "KEY", ...many("f"), "f1"], wrongKeys: ["s", "l", "t"] },
+      { cmd: ["SADD", "KEY", "m1", "new"], wrongKeys: ["s", "h", "l"] },
+      { cmd: ["SADD", "KEY", ...many("m")], wrongKeys: ["s", "h", "l"] },
+      { cmd: ["SREM", "KEY", "m1", "m2", "f1"], wrongKeys: ["s", "h", "l"] },
+      { cmd: ["SREM", "KEY", ...many("m"), "m1"], wrongKeys: ["s", "h", "l"] },
+      { cmd: ["LPUSH", "KEY", "x", "y"], wrongKeys: ["s", "h", "t"] },
+      { cmd: ["RPUSH", "KEY", "x", "y"], wrongKeys: ["s", "h", "t"] },
+      { cmd: ["LPUSH", "KEY", ...many("v")], wrongKeys: ["s", "h", "t"] },
+      { cmd: ["RPUSH", "KEY", ...many("v")], wrongKeys: ["s", "h", "t"] },
+      { cmd: ["LPOP", "KEY"], wrongKeys: ["s", "h", "t"] },
+      { cmd: ["RPOP", "KEY"], wrongKeys: ["s", "h", "t"] },
+      { cmd: ["LPOP", "KEY", "2"], wrongKeys: ["s", "h", "t"] },
+      { cmd: ["RPOP", "KEY", "2"], wrongKeys: ["s", "h", "t"] },
+      { cmd: ["INCR", "KEY"], wrongKeys: ["h", "l", "t"] },
+      { cmd: ["INCRBY", "KEY", "5"], wrongKeys: ["h", "l", "t"] },
+      { cmd: ["DECR", "KEY"], wrongKeys: ["h", "l", "t"] },
+      { cmd: ["DECRBY", "KEY", "5"], wrongKeys: ["h", "l", "t"] },
+    ];
+
+    for (const { cmd, wrongKeys } of cases) {
+      for (const wrongKey of wrongKeys) {
+        const name = `${cmd[0]} (${cmd.length} args) on ${wrongKey} is rejected without changes`;
+        it(name, () => {
+          seed();
+          const before = snapshot();
+          const actual = cmd.map((arg) => (arg === "KEY" ? wrongKey : arg));
+          expect(db.command(actual)).toEqual(WRONGTYPE);
+          expect(snapshot()).toEqual(before);
+        });
+      }
+    }
+
+    it("wrong-type pushes and pops on an empty-looking key do not delete it", () => {
+      db.run(["SET", "s", "str"]);
+      db.run(["HSET", "h", "f", "v"]);
+      for (const cmd of [
+        ["SREM", "s", "m"],
+        ["LPOP", "s"],
+        ["RPOP", "h", "3"],
+        ["SREM", "h", "m"],
+      ]) {
+        expect(db.command(cmd)).toEqual(WRONGTYPE);
+      }
+      expect(db.run(["GET", "s"])).toBe("str");
+      expect(db.run(["HGETALL", "h"])).toEqual(["f", "v"]);
+    });
+
+    it("correct-type writes still work after a rejected wrong-type write", () => {
+      seed();
+      expect(db.command(["SADD", "h", "x"])).toEqual(WRONGTYPE);
+      expect(db.run(["HSET", "h", "f3", "v3"])).toBe(1);
+      expect(db.run(["HDEL", "h", "f1"])).toBe(1);
+      expect(db.run(["HGETALL", "h"])).toEqual(["f2", "v2", "f3", "v3"]);
+      expect(db.run(["SREM", "t", "m1", "m2"])).toBe(2);
+      expect(db.run(["EXISTS", "t"])).toBe(0);
+      expect(db.run(["LPOP", "l", "3"])).toEqual(["a", "b", "c"]);
+      expect(db.run(["EXISTS", "l"])).toBe(0);
+    });
+
+    it("SET and MSET still overwrite keys of any other type", () => {
+      seed();
+      expect(db.run(["SET", "h", "x"])).toBe("OK");
+      expect(db.run(["SET", "l", "x"])).toBe("OK");
+      expect(db.run(["MSET", "t", "x", "s", "y"])).toBe("OK");
+      expect(db.run(["GET", "h"])).toBe("x");
+      expect(db.run(["GET", "l"])).toBe("x");
+      expect(db.run(["GET", "t"])).toBe("x");
+      expect(db.run(["GET", "s"])).toBe("y");
+      expect(db.rows("SELECT key FROM hashes")).toHaveLength(0);
+      expect(db.rows("SELECT key FROM lists")).toHaveLength(0);
+      expect(db.rows("SELECT key FROM sets")).toHaveLength(0);
+    });
+
+    it("SET XX and KEEPTTL still overwrite keys of another type", () => {
+      seed();
+      expect(db.run(["SET", "h", "x", "XX"])).toBe("OK");
+      expect(db.run(["SET", "l", "x", "KEEPTTL"])).toBe("OK");
+      expect(db.run(["GET", "h"])).toBe("x");
+      expect(db.run(["GET", "l"])).toBe("x");
+      expect(db.run(["TTL", "l"])).toBeGreaterThan(0);
+      expect(db.command(["HSET", "h", "f", "v"])).toEqual(WRONGTYPE);
+    });
+
+    it("DEL, EXPIRE and PERSIST work on any type", () => {
+      seed();
+      expect(db.run(["PERSIST", "h"])).toBe(1);
+      expect(db.run(["EXPIRE", "l", "100"])).toBe(1);
+      expect(db.run(["DEL", "h", "l", "t"])).toBe(3);
+      expect(db.rows("SELECT key FROM hashes")).toHaveLength(0);
+    });
+  });
+
   describe("utility", () => {
     it("PING/DBSIZE/KEYS/FLUSHDB", () => {
       expect(db.run(["PING"])).toBe("PONG");

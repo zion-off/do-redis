@@ -5,6 +5,7 @@ import {
   checkKeyType,
   chunk,
   deleteIfExpired,
+  keyHasType,
   placeholders,
   rowString,
   rowStringOrNull,
@@ -87,10 +88,13 @@ export function translateHSet(args: string[]): Translation {
     for (const [field, value] of group) {
       params.push(key, field, value);
     }
+    params.push(key);
     statements.push({
-      sql: `INSERT INTO hashes (key, field, value) VALUES ${group
+      sql: `INSERT INTO hashes (key, field, value) SELECT column1, column2, column3 FROM (VALUES ${group
         .map(() => "(?, ?, ?)")
-        .join(", ")} ON CONFLICT(key, field) DO UPDATE SET value = excluded.value`,
+        .join(", ")}) WHERE ${keyHasType(
+        "hash"
+      )} ON CONFLICT(key, field) DO UPDATE SET value = excluded.value`,
       params,
     });
   }
@@ -131,8 +135,8 @@ export function translateHDel(args: string[]): Translation {
     statements.push({
       sql: `DELETE FROM hashes WHERE key = ? AND field IN (${placeholders(
         group.length
-      )}) RETURNING field`,
-      params: [key, ...group],
+      )}) AND ${keyHasType("hash")} RETURNING field`,
+      params: [key, ...group, key],
     });
   }
 

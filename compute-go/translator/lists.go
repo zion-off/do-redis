@@ -27,6 +27,7 @@ func pushStatement(key string, values []string, left bool) Statement {
 		}
 		params = append(params, i+1, value)
 	}
+	params = append(params, key)
 
 	anchor := `COALESCE(MAX("index"), 0.0) AS base`
 	offset := "b.base + v.ord"
@@ -36,7 +37,7 @@ func pushStatement(key string, values []string, left bool) Statement {
 	}
 
 	return Statement{
-		SQL:    `INSERT INTO lists (key, "index", value) SELECT ?, ` + offset + ", v.val FROM (SELECT " + anchor + " FROM lists WHERE key = ?) AS b, (" + strings.Join(rows, " UNION ALL ") + ") AS v",
+		SQL:    `INSERT INTO lists (key, "index", value) SELECT ?, ` + offset + ", v.val FROM (SELECT " + anchor + " FROM lists WHERE key = ?) AS b, (" + strings.Join(rows, " UNION ALL ") + ") AS v WHERE " + keyHasType("list"),
 		Params: params,
 	}
 }
@@ -131,15 +132,15 @@ func translatePop(args []string, cmd string, left bool) (Translation, error) {
 		if !left {
 			order = "DESC"
 		}
-		popSQL = `DELETE FROM lists WHERE key = ? AND "index" IN (SELECT "index" FROM lists WHERE key = ? ORDER BY "index" ` + order + ` LIMIT ?) RETURNING "index", value`
-		popParams = []any{key, key, count}
+		popSQL = `DELETE FROM lists WHERE key = ? AND ` + keyHasType("list") + ` AND "index" IN (SELECT "index" FROM lists WHERE key = ? ORDER BY "index" ` + order + ` LIMIT ?) RETURNING "index", value`
+		popParams = []any{key, key, key, count}
 	} else {
 		if left {
-			popSQL = `DELETE FROM lists WHERE key = ? AND "index" = (SELECT MIN("index") FROM lists WHERE key = ?) RETURNING "index", value`
-			popParams = []any{key, key}
+			popSQL = `DELETE FROM lists WHERE key = ? AND ` + keyHasType("list") + ` AND "index" = (SELECT MIN("index") FROM lists WHERE key = ?) RETURNING "index", value`
+			popParams = []any{key, key, key}
 		} else {
-			popSQL = `DELETE FROM lists WHERE key = ? AND "index" = (SELECT MAX("index") FROM lists WHERE key = ?) RETURNING "index", value`
-			popParams = []any{key, key}
+			popSQL = `DELETE FROM lists WHERE key = ? AND ` + keyHasType("list") + ` AND "index" = (SELECT MAX("index") FROM lists WHERE key = ?) RETURNING "index", value`
+			popParams = []any{key, key, key}
 		}
 	}
 
@@ -149,7 +150,7 @@ func translatePop(args []string, cmd string, left bool) (Translation, error) {
 		Params: popParams,
 	})
 	stmts = append(stmts, Statement{
-		SQL:    "DELETE FROM keys WHERE key = ? AND NOT EXISTS (SELECT 1 FROM lists WHERE key = ?)",
+		SQL:    "DELETE FROM keys WHERE key = ? AND type = 'list' AND NOT EXISTS (SELECT 1 FROM lists WHERE key = ?)",
 		Params: []any{key, key},
 	})
 

@@ -530,3 +530,113 @@ func TestLargeCommandsEndToEnd(t *testing.T) {
 	h.expect(150, append([]string{"HDEL", "h"}, keys...)...)
 	h.expect([]any{}, "HGETALL", "h")
 }
+
+// snapshot dumps every table so tests can assert a command changed nothing.
+func (h *harness) snapshot() []any {
+	return []any{
+		h.query("SELECT key, type, expires_at FROM keys ORDER BY key"),
+		h.query("SELECT key, value FROM strings ORDER BY key"),
+		h.query("SELECT key, field, value FROM hashes ORDER BY key, field"),
+		h.query(`SELECT key, "index", value FROM lists ORDER BY key, "index"`),
+		h.query("SELECT key, member FROM sets ORDER BY key, member"),
+	}
+}
+
+func seedOneKeyPerType(h *harness) {
+	h.expect("OK", "SET", "s", "str")
+	h.expect(2, "HSET", "h", "f1", "v1", "f2", "v2")
+	h.expect(3, "RPUSH", "l", "a", "b", "c")
+	h.expect(2, "SADD", "t", "m1", "m2")
+	// A TTL on every key makes expires_at changes visible in the snapshot.
+	for _, key := range []string{"s", "h", "l", "t"} {
+		h.expect(1, "EXPIREAT", key, futureTimestamp)
+	}
+}
+
+func TestWrongTypeWritesLeaveDatabaseUntouched(t *testing.T) {
+	many := make([]string, 150)
+	manyPairs := make([]string, 0, 300)
+	for i := range many {
+		many[i] = fmt.Sprintf("x%d", i)
+		manyPairs = append(manyPairs, many[i], "v")
+	}
+	with := func(prefix []string, rest ...string) []string {
+		return append(append([]string{}, prefix...), rest...)
+	}
+
+	cases := []struct {
+		cmd       []string // "KEY" is replaced by each wrong-typed key
+		wrongKeys []string
+	}{
+		{[]string{"HSET", "KEY", "f1", "x", "new", "y"}, []string{"s", "l", "t"}},
+		{with([]string{"HSET", "KEY"}, manyPairs...), []string{"s", "l", "t"}},
+		{[]string{"HDEL", "KEY", "f1", "f2", "m1", "a"}, []string{"s", "l", "t"}},
+		{with([]string{"HDEL", "KEY"}, many...), []string{"s", "l", "t"}},
+		{[]string{"SADD", "KEY", "m1", "new"}, []string{"s", "h", "l"}},
+		{with([]string{"SADD", "KEY"}, many...), []string{"s", "h", "l"}},
+		{[]string{"SREM", "KEY", "m1", "m2", "f1"}, []string{"s", "h", "l"}},
+		{with([]string{"SREM", "KEY"}, many...), []string{"s", "h", "l"}},
+		{[]string{"LPUSH", "KEY", "x", "y"}, []string{"s", "h", "t"}},
+		{[]string{"RPUSH", "KEY", "x", "y"}, []string{"s", "h", "t"}},
+		{with([]string{"LPUSH", "KEY"}, many...), []string{"s", "h", "t"}},
+		{with([]string{"RPUSH", "KEY"}, many...), []string{"s", "h", "t"}},
+		{[]string{"LPOP", "KEY"}, []string{"s", "h", "t"}},
+		{[]string{"RPOP", "KEY"}, []string{"s", "h", "t"}},
+		{[]string{"LPOP", "KEY", "2"}, []string{"s", "h", "t"}},
+		{[]string{"RPOP", "KEY", "2"}, []string{"s", "h", "t"}},
+		{[]string{"INCR", "KEY"}, []string{"h", "l", "t"}},
+		{[]string{"INCRBY", "KEY", "5"}, []string{"h", "l", "t"}},
+		{[]string{"DECR", "KEY"}, []string{"h", "l", "t"}},
+		{[]string{"DECRBY", "KEY", "5"}, []string{"h", "l", "t"}},
+	}
+
+	for _, tc := range cases {
+		for _, wrongKey := range tc.wrongKeys {
+			cmd := make([]string, len(tc.cmd))
+			for i, arg := range tc.cmd {
+				cmd[i] = arg
+				if arg == "KEY" {
+					cmd[i] = wrongKey
+				}
+			}
+			t.Run(fmt.Sprintf("%s/%d args/%s", cmd[0], len(cmd), wrongKey), func(t *testing.T) {
+				h := newHarness(t)
+				seedOneKeyPerType(h)
+				before := h.snapshot()
+				h.expectError(wrongTypeMessage, cmd...)
+				if after := h.snapshot(); !reflect.DeepEqual(before, after) {
+					t.Fatalf("%v changed the database:\nbefore %v\nafter  %v", cmd, before, after)
+				}
+			})
+		}
+	}
+}
+
+func TestSetAndMSetStillOverwriteOtherTypes(t *testing.T) {
+	h := newHarness(t)
+	seedOneKeyPerType(h)
+
+	h.expect("OK", "SET", "h", "x")
+	h.expect("OK", "SET", "l", "x", "XX")
+	h.expect("OK", "SET", "t", "x", "KEEPTTL")
+	h.expect("OK", "MSET", "s", "y", "h", "z")
+	h.expect("z", "GET", "h")
+	h.expect("x", "GET", "l")
+	h.expect("x", "GET", "t")
+	h.expect("y", "GET", "s")
+	h.expectError(wrongTypeMessage, "HSET", "h", "f", "v")
+}
+
+func TestWrongTypeRejectionKeepsCorrectTypeWorking(t *testing.T) {
+	h := newHarness(t)
+	seedOneKeyPerType(h)
+
+	h.expectError(wrongTypeMessage, "SADD", "h", "x")
+	h.expect(1, "HSET", "h", "f3", "v3")
+	h.expect(1, "HDEL", "h", "f1")
+	h.expect([]any{"f2", "v2", "f3", "v3"}, "HGETALL", "h")
+	h.expect(2, "SREM", "t", "m1", "m2")
+	h.expect(0, "EXISTS", "t")
+	h.expect([]any{"a", "b", "c"}, "LPOP", "l", "3")
+	h.expect(0, "EXISTS", "l")
+}

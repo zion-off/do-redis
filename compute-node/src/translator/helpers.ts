@@ -11,6 +11,16 @@ export const MAX_ITEMS_PER_STATEMENT = 64;
 /** Matches rows in `keys` that have not expired yet. */
 export const LIVE_KEY = "(expires_at IS NULL OR expires_at > unixepoch())";
 
+/**
+ * SQL predicate (one bound parameter: the key) that holds only while the key
+ * exists with the given type. Mutating child-table statements embed it so a
+ * wrong-typed key is left untouched even though the whole batch still runs
+ * before the type check in mapResult reports WRONGTYPE.
+ */
+export function keyHasType(type: string): string {
+  return `EXISTS (SELECT 1 FROM keys WHERE key = ? AND type = '${type}')`;
+}
+
 export function deleteIfExpired(key: string): Statement {
   return {
     sql: "DELETE FROM keys WHERE key = ? AND expires_at IS NOT NULL AND expires_at <= unixepoch()",

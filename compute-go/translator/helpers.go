@@ -15,6 +15,14 @@ const liveKey = "(expires_at IS NULL OR expires_at > unixepoch())"
 // liveKeyLookup matches a single live key through the alias `k`.
 const liveKeyLookup = "k.key = ? AND (k.expires_at IS NULL OR k.expires_at > unixepoch())"
 
+// keyHasType returns an SQL predicate (one bound parameter: the key) that holds
+// only while the key exists with the given type. Mutating child-table
+// statements embed it so a wrong-typed key is left untouched even though the
+// whole batch runs before MapResult reports WRONGTYPE.
+func keyHasType(keyType string) string {
+	return "EXISTS (SELECT 1 FROM keys WHERE key = ? AND type = '" + keyType + "')"
+}
+
 func wrongTypeFor(results [][]map[string]any, index int, expected string) bool {
 	if index < 0 || index >= len(results) {
 		return false

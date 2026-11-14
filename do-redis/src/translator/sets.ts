@@ -5,6 +5,7 @@ import {
   checkKeyType,
   chunk,
   deleteIfExpired,
+  keyHasType,
   parseIntStrict,
   placeholders,
   rowString,
@@ -33,11 +34,12 @@ export function translateSAdd(args: string[]): Translation {
     for (const member of group) {
       params.push(key, member);
     }
+    params.push(key);
     insertIndexes.push(statements.length);
     statements.push({
-      sql: `INSERT OR IGNORE INTO sets (key, member) VALUES ${group
+      sql: `INSERT OR IGNORE INTO sets (key, member) SELECT column1, column2 FROM (VALUES ${group
         .map(() => "(?, ?)")
-        .join(", ")} RETURNING member`,
+        .join(", ")}) WHERE ${keyHasType("set")} RETURNING member`,
       params,
     });
   }
@@ -75,13 +77,13 @@ export function translateSRem(args: string[]): Translation {
     statements.push({
       sql: `DELETE FROM sets WHERE key = ? AND member IN (${placeholders(
         group.length
-      )}) RETURNING member`,
-      params: [key, ...group],
+      )}) AND ${keyHasType("set")} RETURNING member`,
+      params: [key, ...group, key],
     });
   }
 
   statements.push({
-    sql: "DELETE FROM keys WHERE key = ? AND NOT EXISTS (SELECT 1 FROM sets WHERE key = ?)",
+    sql: "DELETE FROM keys WHERE key = ? AND type = 'set' AND NOT EXISTS (SELECT 1 FROM sets WHERE key = ?)",
     params: [key, key],
   });
 

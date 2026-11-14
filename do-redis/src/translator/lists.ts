@@ -5,6 +5,7 @@ import {
   checkKeyType,
   chunk,
   deleteIfExpired,
+  keyHasType,
   parseIntStrict,
   rowString,
   rowStringOrNull,
@@ -23,6 +24,7 @@ function pushStatement(key: string, values: string[], left: boolean): Statement 
   for (let i = 0; i < values.length; i++) {
     params.push(i + 1, values[i]);
   }
+  params.push(key);
 
   const anchor = left
     ? 'COALESCE(MIN("index"), 1.0) AS base'
@@ -30,7 +32,7 @@ function pushStatement(key: string, values: string[], left: boolean): Statement 
   const offset = left ? "b.base - v.ord" : "b.base + v.ord";
 
   return {
-    sql: `INSERT INTO lists (key, "index", value) SELECT ?, ${offset}, v.val FROM (SELECT ${anchor} FROM lists WHERE key = ?) AS b, (${rows}) AS v`,
+    sql: `INSERT INTO lists (key, "index", value) SELECT ?, ${offset}, v.val FROM (SELECT ${anchor} FROM lists WHERE key = ?) AS b, (${rows}) AS v WHERE ${keyHasType("list")}`,
     params,
   };
 }
@@ -107,22 +109,26 @@ function translatePop(args: string[], cmd: string, left: boolean): Translation {
   let popParams: unknown[] = [];
   if (hasCount) {
     const order = left ? "ASC" : "DESC";
-    popSQL = `DELETE FROM lists WHERE key = ? AND "index" IN (SELECT "index" FROM lists WHERE key = ? ORDER BY "index" ${order} LIMIT ?) RETURNING "index", value`;
-    popParams = [key, key, count];
+    popSQL = `DELETE FROM lists WHERE key = ? AND ${keyHasType(
+      "list"
+    )} AND "index" IN (SELECT "index" FROM lists WHERE key = ? ORDER BY "index" ${order} LIMIT ?) RETURNING "index", value`;
+    popParams = [key, key, key, count];
   } else if (left) {
-    popSQL =
-      'DELETE FROM lists WHERE key = ? AND "index" = (SELECT MIN("index") FROM lists WHERE key = ?) RETURNING "index", value';
-    popParams = [key, key];
+    popSQL = `DELETE FROM lists WHERE key = ? AND ${keyHasType(
+      "list"
+    )} AND "index" = (SELECT MIN("index") FROM lists WHERE key = ?) RETURNING "index", value`;
+    popParams = [key, key, key];
   } else {
-    popSQL =
-      'DELETE FROM lists WHERE key = ? AND "index" = (SELECT MAX("index") FROM lists WHERE key = ?) RETURNING "index", value';
-    popParams = [key, key];
+    popSQL = `DELETE FROM lists WHERE key = ? AND ${keyHasType(
+      "list"
+    )} AND "index" = (SELECT MAX("index") FROM lists WHERE key = ?) RETURNING "index", value`;
+    popParams = [key, key, key];
   }
 
   const popIndex = statements.length;
   statements.push({ sql: popSQL, params: popParams });
   statements.push({
-    sql: "DELETE FROM keys WHERE key = ? AND NOT EXISTS (SELECT 1 FROM lists WHERE key = ?)",
+    sql: "DELETE FROM keys WHERE key = ? AND type = 'list' AND NOT EXISTS (SELECT 1 FROM lists WHERE key = ?)",
     params: [key, key],
   });
 

@@ -1,6 +1,17 @@
 import type { Statement, Translation } from "./types";
 import { ErrWrongType, errWrongArgs } from "./errors";
-import { deleteIfExpired, rowString, wrongTypeFor } from "./helpers";
+import {
+  MAX_ITEMS_PER_STATEMENT,
+  checkKeyType,
+  chunk,
+  deleteIfExpired,
+  placeholders,
+  rowString,
+  rowStringOrNull,
+  wrongTypeFor,
+} from "./helpers";
+
+const LIVE_KEY_LOOKUP = "k.key = ? AND (k.expires_at IS NULL OR k.expires_at > unixepoch())";
 
 export function translateHGet(args: string[]): Translation {
   if (args.length !== 2) {
@@ -10,21 +21,20 @@ export function translateHGet(args: string[]): Translation {
   const key = args[0];
   const field = args[1];
   const statements: Statement[] = [
-    deleteIfExpired(key),
-    { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
-    { sql: "SELECT value FROM hashes WHERE key = ? AND field = ?", params: [key, field] },
+    {
+      sql: `SELECT k.type AS type, h.value AS value FROM keys k LEFT JOIN hashes h ON h.key = k.key AND h.field = ? WHERE ${LIVE_KEY_LOOKUP}`,
+      params: [field, key],
+    },
   ];
 
   return {
     statements,
     mapResult: (results) => {
-      if (wrongTypeFor(results, 1, "hash")) {
-        throw ErrWrongType;
-      }
-      if (results[2].length === 0) {
+      const rows = results[0];
+      if (!checkKeyType(rows, "hash")) {
         return null;
       }
-      return rowString(results[2][0], "value");
+      return rowStringOrNull(rows[0], "value");
     },
   };
 }
@@ -35,27 +45,54 @@ export function translateHSet(args: string[]): Translation {
   }
 
   const key = args[0];
-  const statements: Statement[] = [
-    deleteIfExpired(key),
-    { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
-    { sql: "INSERT OR IGNORE INTO keys (key, type) VALUES (?, 'hash')", params: [key] },
-  ];
-
-  const insertIndexes: number[] = [];
+  // Later assignments to the same field win, and a repeated field only counts
+  // once towards the "fields added" reply.
+  const pairs = new Map<string, string>();
   for (let i = 1; i < args.length; i += 2) {
-    const field = args[i];
-    const value = args[i + 1];
-    insertIndexes.push(statements.length);
-    statements.push(
-      {
-        sql: "INSERT OR IGNORE INTO hashes (key, field, value) VALUES (?, ?, ?) RETURNING field",
-        params: [key, field, value],
-      },
-      {
-        sql: "UPDATE hashes SET value = ? WHERE key = ? AND field = ? AND NOT EXISTS (SELECT 1 WHERE changes() > 0)",
-        params: [value, key, field],
-      }
-    );
+    pairs.set(args[i], args[i + 1]);
+  }
+  const fields = [...pairs.keys()];
+
+  const statements: Statement[] = [deleteIfExpired(key)];
+  const existingIndexes: number[] = [];
+
+  if (fields.length <= MAX_ITEMS_PER_STATEMENT) {
+    existingIndexes.push(statements.length);
+    statements.push({
+      sql: `SELECT k.type AS type, (SELECT COUNT(*) FROM hashes h WHERE h.key = k.key AND h.field IN (${placeholders(
+        fields.length
+      )})) AS existing FROM keys k WHERE k.key = ?`,
+      params: [...fields, key],
+    });
+  } else {
+    statements.push({ sql: "SELECT type FROM keys WHERE key = ?", params: [key] });
+    for (const group of chunk(fields, MAX_ITEMS_PER_STATEMENT)) {
+      existingIndexes.push(statements.length);
+      statements.push({
+        sql: `SELECT COUNT(*) AS existing FROM hashes WHERE key = ? AND field IN (${placeholders(
+          group.length
+        )})`,
+        params: [key, ...group],
+      });
+    }
+  }
+
+  statements.push({
+    sql: "INSERT OR IGNORE INTO keys (key, type) VALUES (?, 'hash')",
+    params: [key],
+  });
+
+  for (const group of chunk([...pairs], MAX_ITEMS_PER_STATEMENT)) {
+    const params: unknown[] = [];
+    for (const [field, value] of group) {
+      params.push(key, field, value);
+    }
+    statements.push({
+      sql: `INSERT INTO hashes (key, field, value) VALUES ${group
+        .map(() => "(?, ?, ?)")
+        .join(", ")} ON CONFLICT(key, field) DO UPDATE SET value = excluded.value`,
+      params,
+    });
   }
 
   return {
@@ -64,11 +101,14 @@ export function translateHSet(args: string[]): Translation {
       if (wrongTypeFor(results, 1, "hash")) {
         throw ErrWrongType;
       }
-      let count = 0;
-      for (const index of insertIndexes) {
-        count += results[index].length;
+      let existing = 0;
+      for (const index of existingIndexes) {
+        const rows = results[index];
+        if (rows.length > 0) {
+          existing += Number(rows[0]["existing"] ?? 0);
+        }
       }
-      return count;
+      return fields.length - existing;
     },
   };
 }
@@ -79,18 +119,20 @@ export function translateHDel(args: string[]): Translation {
   }
 
   const key = args[0];
+  const fields = [...new Set(args.slice(1))];
   const statements: Statement[] = [
     deleteIfExpired(key),
     { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
   ];
 
   const deleteIndexes: number[] = [];
-  for (let i = 1; i < args.length; i++) {
-    const field = args[i];
+  for (const group of chunk(fields, MAX_ITEMS_PER_STATEMENT)) {
     deleteIndexes.push(statements.length);
     statements.push({
-      sql: "DELETE FROM hashes WHERE key = ? AND field = ? RETURNING field",
-      params: [key, field],
+      sql: `DELETE FROM hashes WHERE key = ? AND field IN (${placeholders(
+        group.length
+      )}) RETURNING field`,
+      params: [key, ...group],
     });
   }
 
@@ -116,19 +158,24 @@ export function translateHGetAll(args: string[]): Translation {
 
   const key = args[0];
   const statements: Statement[] = [
-    deleteIfExpired(key),
-    { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
-    { sql: "SELECT field, value FROM hashes WHERE key = ? ORDER BY field", params: [key] },
+    {
+      sql: `SELECT k.type AS type, h.field AS field, h.value AS value FROM keys k LEFT JOIN hashes h ON h.key = k.key WHERE ${LIVE_KEY_LOOKUP} ORDER BY h.field`,
+      params: [key],
+    },
   ];
 
   return {
     statements,
     mapResult: (results) => {
-      if (wrongTypeFor(results, 1, "hash")) {
-        throw ErrWrongType;
+      const rows = results[0];
+      if (!checkKeyType(rows, "hash")) {
+        return [];
       }
       const out: unknown[] = [];
-      for (const row of results[2]) {
+      for (const row of rows) {
+        if (rowStringOrNull(row, "field") === null) {
+          continue;
+        }
         out.push(rowString(row, "field"), rowString(row, "value"));
       }
       return out;
@@ -144,64 +191,61 @@ export function translateHExists(args: string[]): Translation {
   const key = args[0];
   const field = args[1];
   const statements: Statement[] = [
-    deleteIfExpired(key),
-    { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
-    { sql: "SELECT 1 FROM hashes WHERE key = ? AND field = ?", params: [key, field] },
+    {
+      sql: `SELECT k.type AS type, EXISTS (SELECT 1 FROM hashes h WHERE h.key = k.key AND h.field = ?) AS present FROM keys k WHERE ${LIVE_KEY_LOOKUP}`,
+      params: [field, key],
+    },
   ];
 
   return {
     statements,
     mapResult: (results) => {
-      if (wrongTypeFor(results, 1, "hash")) {
-        throw ErrWrongType;
+      const rows = results[0];
+      if (!checkKeyType(rows, "hash")) {
+        return 0;
       }
-      return results[2].length > 0 ? 1 : 0;
+      return Number(rows[0]["present"] ?? 0) > 0 ? 1 : 0;
+    },
+  };
+}
+
+function translateHashColumn(args: string[], cmd: string, column: "field" | "value"): Translation {
+  if (args.length !== 1) {
+    throw errWrongArgs(cmd);
+  }
+
+  const key = args[0];
+  const statements: Statement[] = [
+    {
+      sql: `SELECT k.type AS type, h.${column} AS ${column} FROM keys k LEFT JOIN hashes h ON h.key = k.key WHERE ${LIVE_KEY_LOOKUP} ORDER BY h.field`,
+      params: [key],
+    },
+  ];
+
+  return {
+    statements,
+    mapResult: (results) => {
+      const rows = results[0];
+      if (!checkKeyType(rows, "hash")) {
+        return [];
+      }
+      const out: string[] = [];
+      for (const row of rows) {
+        const value = rowStringOrNull(row, column);
+        if (value === null) {
+          continue;
+        }
+        out.push(value);
+      }
+      return out;
     },
   };
 }
 
 export function translateHKeys(args: string[]): Translation {
-  if (args.length !== 1) {
-    throw errWrongArgs("hkeys");
-  }
-
-  const key = args[0];
-  const statements: Statement[] = [
-    deleteIfExpired(key),
-    { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
-    { sql: "SELECT field FROM hashes WHERE key = ? ORDER BY field", params: [key] },
-  ];
-
-  return {
-    statements,
-    mapResult: (results) => {
-      if (wrongTypeFor(results, 1, "hash")) {
-        throw ErrWrongType;
-      }
-      return results[2].map((row) => rowString(row, "field"));
-    },
-  };
+  return translateHashColumn(args, "hkeys", "field");
 }
 
 export function translateHVals(args: string[]): Translation {
-  if (args.length !== 1) {
-    throw errWrongArgs("hvals");
-  }
-
-  const key = args[0];
-  const statements: Statement[] = [
-    deleteIfExpired(key),
-    { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
-    { sql: "SELECT value FROM hashes WHERE key = ? ORDER BY field", params: [key] },
-  ];
-
-  return {
-    statements,
-    mapResult: (results) => {
-      if (wrongTypeFor(results, 1, "hash")) {
-        throw ErrWrongType;
-      }
-      return results[2].map((row) => rowString(row, "value"));
-    },
-  };
+  return translateHashColumn(args, "hvals", "value");
 }

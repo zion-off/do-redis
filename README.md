@@ -36,7 +36,13 @@ objects. drop-in replacement for upstash redis.
 - forwards the queries to the storage layer, a durable object instance
 - durable object executes the queries against its sqlite database and returns
   the result
+- commands in a pipeline run inside a single sqlite transaction
 - compute layer returns the result to the client
+
+expired keys are filtered out of every read, and a background sweep deletes
+them from sqlite at most once per second, so they stop counting towards storage
+shortly after they expire. re-run `INIT` after upgrading to create the index
+the sweep uses — it is safe to run at any time.
 
 ### setup
 

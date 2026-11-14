@@ -2,6 +2,30 @@ package translator
 
 import "path"
 
+// literalPrefix returns the longest literal prefix of a glob pattern, limited
+// to printable ASCII so the derived key range is safe under BINARY collation.
+func literalPrefix(pattern string) string {
+	var prefix []byte
+	for i := 0; i < len(pattern); i++ {
+		ch := pattern[i]
+		if ch == '*' || ch == '?' || ch == '[' {
+			break
+		}
+		if ch == '\\' {
+			if i+1 >= len(pattern) {
+				return ""
+			}
+			ch = pattern[i+1]
+			i++
+		}
+		if ch < 0x20 || ch >= 0x7e {
+			break
+		}
+		prefix = append(prefix, ch)
+	}
+	return string(prefix)
+}
+
 func translatePing(args []string) (Translation, error) {
 	if len(args) > 1 {
 		return Translation{}, errWrongArgs("ping")
@@ -74,9 +98,20 @@ func translateKeys(args []string) (Translation, error) {
 		return Translation{}, errWrongArgs("keys")
 	}
 
+	// Any key matching the pattern has to start with its literal prefix, so the
+	// scan can be narrowed to a primary key range instead of reading every key.
+	sqlText := "SELECT key FROM keys WHERE " + liveKey + " ORDER BY key"
+	var params []any
+	if prefix := literalPrefix(pattern); prefix != "" {
+		upper := prefix[:len(prefix)-1] + string(prefix[len(prefix)-1]+1)
+		sqlText = "SELECT key FROM keys WHERE key >= ? AND key < ? AND " + liveKey + " ORDER BY key"
+		params = []any{prefix, upper}
+	}
+
 	stmts := []Statement{
 		{
-			SQL: "SELECT key FROM keys WHERE (expires_at IS NULL OR expires_at > unixepoch()) ORDER BY key",
+			SQL:    sqlText,
+			Params: params,
 		},
 	}
 

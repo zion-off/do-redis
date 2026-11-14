@@ -14,13 +14,8 @@ func translateGet(args []string) (Translation, error) {
 
 	key := args[0]
 	stmts := []Statement{
-		deleteIfExpired(key),
 		{
-			SQL:    "SELECT type FROM keys WHERE key = ?",
-			Params: []any{key},
-		},
-		{
-			SQL:    "SELECT value FROM strings WHERE key = ?",
+			SQL:    "SELECT k.type AS type, s.value AS value FROM keys k LEFT JOIN strings s ON s.key = k.key WHERE " + liveKeyLookup,
 			Params: []any{key},
 		},
 	}
@@ -28,13 +23,19 @@ func translateGet(args []string) (Translation, error) {
 	return Translation{
 		Statements: stmts,
 		MapResult: func(results [][]map[string]any) (any, error) {
-			if hasWrongType(results, 1) {
-				return nil, ErrWrongType
+			rows := results[0]
+			found, err := checkKeyType(rows, "string")
+			if err != nil {
+				return nil, err
 			}
-			if len(results[2]) == 0 {
+			if !found {
 				return nil, nil
 			}
-			return rowString(results[2][0], "value"), nil
+			value, ok := rowStringOrNull(rows[0], "value")
+			if !ok {
+				return nil, nil
+			}
+			return value, nil
 		},
 	}, nil
 }
@@ -60,14 +61,30 @@ func translateSet(args []string) (Translation, error) {
 		}
 	}
 
-	stmts := []Statement{deleteIfExpired(key)}
+	conditional := options.nx || options.xx
+
+	// The plain SET path replaces the key unconditionally, so a separate
+	// expired-key cleanup is redundant: the DELETE below removes the row (and
+	// its cascaded children) either way.
+	stmts := []Statement{}
+	if conditional || options.keepTTL {
+		stmts = append(stmts, deleteIfExpired(key))
+	}
+
 	getIndex := -1
 	if options.get {
 		getIndex = len(stmts)
-		stmts = append(stmts, Statement{
-			SQL:    "SELECT value FROM strings WHERE key = ?",
-			Params: []any{key},
-		})
+		if conditional || options.keepTTL {
+			stmts = append(stmts, Statement{
+				SQL:    "SELECT value FROM strings WHERE key = ?",
+				Params: []any{key},
+			})
+		} else {
+			stmts = append(stmts, Statement{
+				SQL:    "SELECT s.value AS value FROM strings s JOIN keys k ON k.key = s.key WHERE s.key = ? AND (k.expires_at IS NULL OR k.expires_at > unixepoch())",
+				Params: []any{key},
+			})
+		}
 	}
 
 	okIndex := -1
@@ -163,11 +180,14 @@ func translateDel(args []string) (Translation, error) {
 		return Translation{}, errWrongArgs("del")
 	}
 
-	stmts := make([]Statement, 0, len(args))
-	for _, key := range args {
+	// Expired-but-not-yet-swept rows are dropped too, but only live keys count
+	// towards the reply.
+	groups := chunkStrings(uniqueStrings(args), maxItemsPerStatement)
+	stmts := make([]Statement, 0, len(groups))
+	for _, group := range groups {
 		stmts = append(stmts, Statement{
-			SQL:    "DELETE FROM keys WHERE key = ? RETURNING key",
-			Params: []any{key},
+			SQL:    "DELETE FROM keys WHERE key IN (" + placeholders(len(group)) + ") RETURNING " + liveKey + " AS live",
+			Params: toAnySlice(group),
 		})
 	}
 
@@ -176,7 +196,11 @@ func translateDel(args []string) (Translation, error) {
 		MapResult: func(results [][]map[string]any) (any, error) {
 			var count int64
 			for _, res := range results {
-				count += int64(len(res))
+				for _, row := range res {
+					if rowTruthy(row, "live") {
+						count++
+					}
+				}
 			}
 			return count, nil
 		},
@@ -188,20 +212,27 @@ func translateExists(args []string) (Translation, error) {
 		return Translation{}, errWrongArgs("exists")
 	}
 
-	stmts := make([]Statement, 0, len(args))
-	for _, key := range args {
+	groups := chunkStrings(uniqueStrings(args), maxItemsPerStatement)
+	stmts := make([]Statement, 0, len(groups))
+	for _, group := range groups {
 		stmts = append(stmts, Statement{
-			SQL:    "SELECT 1 FROM keys WHERE key = ? AND (expires_at IS NULL OR expires_at > unixepoch())",
-			Params: []any{key},
+			SQL:    "SELECT key FROM keys WHERE key IN (" + placeholders(len(group)) + ") AND " + liveKey,
+			Params: toAnySlice(group),
 		})
 	}
 
 	return Translation{
 		Statements: stmts,
 		MapResult: func(results [][]map[string]any) (any, error) {
-			var count int64
+			live := make(map[string]struct{})
 			for _, res := range results {
-				if len(res) > 0 {
+				for _, row := range res {
+					live[rowString(row, "key")] = struct{}{}
+				}
+			}
+			var count int64
+			for _, key := range args {
+				if _, ok := live[key]; ok {
 					count++
 				}
 			}
@@ -251,7 +282,7 @@ func translateIncrByDelta(args []string, delta int64, cmd string) (Translation, 
 	stmts := []Statement{
 		deleteIfExpired(key),
 		{
-			SQL:    "SELECT type FROM keys WHERE key = ?",
+			SQL:    "SELECT k.type AS type, s.value AS value FROM keys k LEFT JOIN strings s ON s.key = k.key WHERE k.key = ?",
 			Params: []any{key},
 		},
 		{
@@ -260,10 +291,6 @@ func translateIncrByDelta(args []string, delta int64, cmd string) (Translation, 
 		},
 		{
 			SQL:    "INSERT OR IGNORE INTO strings (key, value) VALUES (?, '0')",
-			Params: []any{key},
-		},
-		{
-			SQL:    "SELECT value FROM strings WHERE key = ?",
 			Params: []any{key},
 		},
 		{
@@ -278,17 +305,20 @@ func translateIncrByDelta(args []string, delta int64, cmd string) (Translation, 
 			if hasWrongType(results, 1) {
 				return nil, ErrWrongType
 			}
-			if len(results[4]) == 0 {
-				return nil, ErrNotInteger
+			// Missing rows are materialised as '0' by the statements above.
+			before := "0"
+			if len(results[1]) > 0 {
+				if current, ok := rowStringOrNull(results[1][0], "value"); ok {
+					before = current
+				}
 			}
-			before := rowString(results[4][0], "value")
 			if _, ok := parseInt64(before); !ok {
 				return nil, ErrNotInteger
 			}
-			if len(results[5]) == 0 {
+			if len(results[4]) == 0 {
 				return nil, ErrNotInteger
 			}
-			after := rowString(results[5][0], "value")
+			after := rowString(results[4][0], "value")
 			value, ok := parseInt64(after)
 			if !ok {
 				return nil, ErrNotInteger
@@ -303,28 +333,31 @@ func translateMGet(args []string) (Translation, error) {
 		return Translation{}, errWrongArgs("mget")
 	}
 
-	stmts := make([]Statement, 0, len(args)*2)
-	for _, key := range args {
-		stmts = append(stmts,
-			deleteIfExpired(key),
-			Statement{
-				SQL:    "SELECT value FROM strings WHERE key = ?",
-				Params: []any{key},
-			},
-		)
+	groups := chunkStrings(uniqueStrings(args), maxItemsPerStatement)
+	stmts := make([]Statement, 0, len(groups))
+	for _, group := range groups {
+		stmts = append(stmts, Statement{
+			SQL:    "SELECT s.key AS key, s.value AS value FROM strings s JOIN keys k ON k.key = s.key WHERE s.key IN (" + placeholders(len(group)) + ") AND (k.expires_at IS NULL OR k.expires_at > unixepoch())",
+			Params: toAnySlice(group),
+		})
 	}
 
 	return Translation{
 		Statements: stmts,
 		MapResult: func(results [][]map[string]any) (any, error) {
+			values := make(map[string]string)
+			for _, res := range results {
+				for _, row := range res {
+					values[rowString(row, "key")] = rowString(row, "value")
+				}
+			}
 			out := make([]any, 0, len(args))
-			for i := range args {
-				res := results[i*2+1]
-				if len(res) == 0 {
-					out = append(out, nil)
+			for _, key := range args {
+				if value, ok := values[key]; ok {
+					out = append(out, value)
 					continue
 				}
-				out = append(out, rowString(res[0], "value"))
+				out = append(out, nil)
 			}
 			return out, nil
 		},
@@ -336,22 +369,40 @@ func translateMSet(args []string) (Translation, error) {
 		return Translation{}, errWrongArgs("mset")
 	}
 
-	stmts := make([]Statement, 0, (len(args)/2)*3)
+	// Later assignments win, matching sequential SET semantics.
+	order := make([]string, 0, len(args)/2)
+	pairs := make(map[string]string, len(args)/2)
 	for i := 0; i < len(args); i += 2 {
 		key := args[i]
-		value := args[i+1]
+		if _, ok := pairs[key]; !ok {
+			order = append(order, key)
+		}
+		pairs[key] = args[i+1]
+	}
+
+	stmts := make([]Statement, 0, 3)
+	for _, group := range chunkStrings(order, maxItemsPerStatement) {
+		keyParams := toAnySlice(group)
+		values := make([]any, 0, len(group)*2)
+		keyTuples := make([]string, 0, len(group))
+		valueTuples := make([]string, 0, len(group))
+		for _, key := range group {
+			values = append(values, key, pairs[key])
+			keyTuples = append(keyTuples, "(?, 'string')")
+			valueTuples = append(valueTuples, "(?, ?)")
+		}
 		stmts = append(stmts,
 			Statement{
-				SQL:    "DELETE FROM keys WHERE key = ?",
-				Params: []any{key},
+				SQL:    "DELETE FROM keys WHERE key IN (" + placeholders(len(group)) + ")",
+				Params: keyParams,
 			},
 			Statement{
-				SQL:    "INSERT INTO keys (key, type) VALUES (?, 'string')",
-				Params: []any{key},
+				SQL:    "INSERT INTO keys (key, type) VALUES " + strings.Join(keyTuples, ", "),
+				Params: keyParams,
 			},
 			Statement{
-				SQL:    "INSERT INTO strings (key, value) VALUES (?, ?)",
-				Params: []any{key, value},
+				SQL:    "INSERT INTO strings (key, value) VALUES " + strings.Join(valueTuples, ", "),
+				Params: values,
 			},
 		)
 	}

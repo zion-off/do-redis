@@ -1,6 +1,18 @@
 import type { Statement, Translation } from "./types";
 import { ErrNotInteger, ErrWrongType, errWrongArgs } from "./errors";
-import { deleteIfExpired, parseIntStrict, rowString, wrongTypeFor } from "./helpers";
+import {
+  MAX_ITEMS_PER_STATEMENT,
+  checkKeyType,
+  chunk,
+  deleteIfExpired,
+  parseIntStrict,
+  placeholders,
+  rowString,
+  rowStringOrNull,
+  wrongTypeFor,
+} from "./helpers";
+
+const LIVE_KEY_LOOKUP = "k.key = ? AND (k.expires_at IS NULL OR k.expires_at > unixepoch())";
 
 export function translateSAdd(args: string[]): Translation {
   if (args.length < 2) {
@@ -8,7 +20,7 @@ export function translateSAdd(args: string[]): Translation {
   }
 
   const key = args[0];
-  const members = args.slice(1);
+  const members = [...new Set(args.slice(1))];
   const statements: Statement[] = [
     deleteIfExpired(key),
     { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
@@ -16,11 +28,17 @@ export function translateSAdd(args: string[]): Translation {
   ];
 
   const insertIndexes: number[] = [];
-  for (const member of members) {
+  for (const group of chunk(members, MAX_ITEMS_PER_STATEMENT)) {
+    const params: unknown[] = [];
+    for (const member of group) {
+      params.push(key, member);
+    }
     insertIndexes.push(statements.length);
     statements.push({
-      sql: "INSERT OR IGNORE INTO sets (key, member) VALUES (?, ?) RETURNING member",
-      params: [key, member],
+      sql: `INSERT OR IGNORE INTO sets (key, member) VALUES ${group
+        .map(() => "(?, ?)")
+        .join(", ")} RETURNING member`,
+      params,
     });
   }
 
@@ -45,18 +63,20 @@ export function translateSRem(args: string[]): Translation {
   }
 
   const key = args[0];
-  const members = args.slice(1);
+  const members = [...new Set(args.slice(1))];
   const statements: Statement[] = [
     deleteIfExpired(key),
     { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
   ];
 
   const deleteIndexes: number[] = [];
-  for (const member of members) {
+  for (const group of chunk(members, MAX_ITEMS_PER_STATEMENT)) {
     deleteIndexes.push(statements.length);
     statements.push({
-      sql: "DELETE FROM sets WHERE key = ? AND member = ? RETURNING member",
-      params: [key, member],
+      sql: `DELETE FROM sets WHERE key = ? AND member IN (${placeholders(
+        group.length
+      )}) RETURNING member`,
+      params: [key, ...group],
     });
   }
 
@@ -87,18 +107,28 @@ export function translateSMembers(args: string[]): Translation {
 
   const key = args[0];
   const statements: Statement[] = [
-    deleteIfExpired(key),
-    { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
-    { sql: "SELECT member FROM sets WHERE key = ? ORDER BY member", params: [key] },
+    {
+      sql: `SELECT k.type AS type, s.member AS member FROM keys k LEFT JOIN sets s ON s.key = k.key WHERE ${LIVE_KEY_LOOKUP} ORDER BY s.member`,
+      params: [key],
+    },
   ];
 
   return {
     statements,
     mapResult: (results) => {
-      if (wrongTypeFor(results, 1, "set")) {
-        throw ErrWrongType;
+      const rows = results[0];
+      if (!checkKeyType(rows, "set")) {
+        return [];
       }
-      return results[2].map((row) => rowString(row, "member"));
+      const out: string[] = [];
+      for (const row of rows) {
+        const member = rowStringOrNull(row, "member");
+        if (member === null) {
+          continue;
+        }
+        out.push(member);
+      }
+      return out;
     },
   };
 }
@@ -111,18 +141,20 @@ export function translateSIsMember(args: string[]): Translation {
   const key = args[0];
   const member = args[1];
   const statements: Statement[] = [
-    deleteIfExpired(key),
-    { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
-    { sql: "SELECT 1 FROM sets WHERE key = ? AND member = ?", params: [key, member] },
+    {
+      sql: `SELECT k.type AS type, EXISTS (SELECT 1 FROM sets s WHERE s.key = k.key AND s.member = ?) AS present FROM keys k WHERE ${LIVE_KEY_LOOKUP}`,
+      params: [member, key],
+    },
   ];
 
   return {
     statements,
     mapResult: (results) => {
-      if (wrongTypeFor(results, 1, "set")) {
-        throw ErrWrongType;
+      const rows = results[0];
+      if (!checkKeyType(rows, "set")) {
+        return 0;
       }
-      return results[2].length > 0 ? 1 : 0;
+      return Number(rows[0]["present"] ?? 0) > 0 ? 1 : 0;
     },
   };
 }
@@ -134,21 +166,20 @@ export function translateSCard(args: string[]): Translation {
 
   const key = args[0];
   const statements: Statement[] = [
-    deleteIfExpired(key),
-    { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
-    { sql: "SELECT COUNT(*) as count FROM sets WHERE key = ?", params: [key] },
+    {
+      sql: `SELECT k.type AS type, (SELECT COUNT(*) FROM sets s WHERE s.key = k.key) AS count FROM keys k WHERE ${LIVE_KEY_LOOKUP}`,
+      params: [key],
+    },
   ];
 
   return {
     statements,
     mapResult: (results) => {
-      if (wrongTypeFor(results, 1, "set")) {
-        throw ErrWrongType;
-      }
-      if (results[2].length === 0) {
+      const rows = results[0];
+      if (!checkKeyType(rows, "set")) {
         return 0;
       }
-      const count = parseIntStrict(rowString(results[2][0], "count"));
+      const count = parseIntStrict(rowString(rows[0], "count"));
       if (count === null) {
         throw ErrNotInteger;
       }

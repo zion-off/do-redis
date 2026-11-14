@@ -25,19 +25,23 @@ function textResponse(body: string, status: number): Response {
   return new Response(body, { status, headers: { "Content-Type": "text/plain" } });
 }
 
-function isStringArray(value: unknown): value is (string | number)[] {
-  return (
-    Array.isArray(value) &&
-    value.every((item) => typeof item === "string" || typeof item === "number")
-  );
-}
-
-function isStringArrayArray(value: unknown): value is (string | number)[][] {
-  return Array.isArray(value) && value.every((item) => isStringArray(item));
-}
-
-function normalizeStringArray(values: (string | number)[]): string[] {
-  return values.map((item) => (typeof item === "number" ? String(item) : item));
+/** Validates and normalizes a command in a single pass. */
+function toCommand(value: unknown): string[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const out: string[] = new Array(value.length);
+  for (let i = 0; i < value.length; i++) {
+    const item = value[i];
+    if (typeof item === "string") {
+      out[i] = item;
+    } else if (typeof item === "number") {
+      out[i] = String(item);
+    } else {
+      return null;
+    }
+  }
+  return out;
 }
 
 function errorMessage(err: unknown): string {
@@ -47,9 +51,44 @@ function errorMessage(err: unknown): string {
   return String(err);
 }
 
+const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const textEncoder = new TextEncoder();
+
+/**
+ * Base64 encodes UTF-8 bytes directly. `btoa(String.fromCharCode(...bytes))`
+ * builds a throwaway latin1 string and blows the call stack on large values.
+ */
+function base64Encode(value: string): string {
+  const bytes = textEncoder.encode(value);
+  const length = bytes.length;
+  let out = "";
+  let i = 0;
+  for (; i + 2 < length; i += 3) {
+    const triple = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+    out +=
+      BASE64_ALPHABET[(triple >> 18) & 63] +
+      BASE64_ALPHABET[(triple >> 12) & 63] +
+      BASE64_ALPHABET[(triple >> 6) & 63] +
+      BASE64_ALPHABET[triple & 63];
+  }
+  const remaining = length - i;
+  if (remaining === 1) {
+    const chunk = bytes[i] << 16;
+    out += BASE64_ALPHABET[(chunk >> 18) & 63] + BASE64_ALPHABET[(chunk >> 12) & 63] + "==";
+  } else if (remaining === 2) {
+    const chunk = (bytes[i] << 16) | (bytes[i + 1] << 8);
+    out +=
+      BASE64_ALPHABET[(chunk >> 18) & 63] +
+      BASE64_ALPHABET[(chunk >> 12) & 63] +
+      BASE64_ALPHABET[(chunk >> 6) & 63] +
+      "=";
+  }
+  return out;
+}
+
 function encodeResult(v: unknown): unknown {
   if (typeof v === "string") {
-    return btoa(String.fromCharCode(...new TextEncoder().encode(v)));
+    return base64Encode(v);
   }
   if (Array.isArray(v)) {
     return v.map(encodeResult);
@@ -90,8 +129,9 @@ export default {
     const id = env.STORAGE.idFromName("global");
     const stub = env.STORAGE.get(id) as StorageStub;
 
-    if (isStringArray(payload)) {
-      const cmd = normalizeStringArray(payload);
+    const single = toCommand(payload);
+    if (single) {
+      const cmd = single;
       if (cmd.length === 1 && cmd[0].toUpperCase() === "INIT") {
         try {
           await stub.init();
@@ -127,11 +167,15 @@ export default {
       }
     }
 
-    if (!isStringArrayArray(payload)) {
-      return jsonResponse({ error: "ERR invalid request body" });
+    const pipeline: string[][] = new Array(payload.length);
+    for (let i = 0; i < payload.length; i++) {
+      const cmd = toCommand(payload[i]);
+      if (!cmd) {
+        return jsonResponse({ error: "ERR invalid request body" });
+      }
+      pipeline[i] = cmd;
     }
 
-    const pipeline = payload.map((cmd) => normalizeStringArray(cmd));
     const results: unknown[] = new Array(pipeline.length);
     const translations: Translation[] = [];
     const indexMap: number[] = [];

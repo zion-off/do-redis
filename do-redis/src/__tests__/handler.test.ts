@@ -136,10 +136,7 @@ describe("handler", () => {
   });
 
   it("handles pipelines", async () => {
-    const pipelineResults: ResultRow[][][] = [
-      [[], [], [], []],
-      [[], [], [{ value: "v" }]],
-    ];
+    const pipelineResults: ResultRow[][][] = [[[], [], []], [[{ type: "string", value: "v" }]]];
     const stub: StorageStub = {
       init: async () => {},
       execBatch: async () => [],
@@ -177,5 +174,65 @@ describe("handler", () => {
     const response = await fetchHandler(request, env);
     const body = (await response.json()) as { result: string };
     expect(body).toEqual({ result: "UE9ORw==" });
+  });
+
+  it("base64 encodes unicode and very large values", async () => {
+    const samples = [
+      "",
+      "a",
+      "ab",
+      "abc",
+      "héllo wörld",
+      "😀 emoji + ünïcode",
+      "x".repeat(300_000),
+    ];
+    for (const sample of samples) {
+      const stub: StorageStub = {
+        init: async () => {},
+        execBatch: async () => [],
+        execPipeline: async () => [],
+      };
+      const request = new Request("http://localhost", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          "Upstash-Encoding": "base64",
+        },
+        body: JSON.stringify(["PING", sample]),
+      });
+      const response = await fetchHandler(request, makeEnv(stub));
+      const body = (await response.json()) as { result: string };
+      const bytes = new TextEncoder().encode(sample);
+      const expected = btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(""));
+      expect(body.result).toBe(expected);
+    }
+  });
+
+  it("rejects malformed payloads", async () => {
+    const stub: StorageStub = {
+      init: async () => {},
+      execBatch: async () => [],
+      execPipeline: async () => [],
+    };
+    const env = makeEnv(stub);
+    const post = (body: string) =>
+      fetchHandler(
+        new Request("http://localhost", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${authToken}` },
+          body,
+        }),
+        env
+      );
+
+    expect(await (await post("{]")).json()).toEqual({ error: "ERR invalid request body" });
+    expect(await (await post('{"a":1}')).json()).toEqual({ error: "ERR invalid request body" });
+    expect(await (await post('[["GET","k"],"GET"]')).json()).toEqual({
+      error: "ERR invalid request body",
+    });
+    expect(await (await post('["GET",{"a":1}]')).json()).toEqual({
+      error: "ERR invalid request body",
+    });
+    expect(await (await post("[]")).json()).toEqual({ error: "ERR empty command" });
   });
 });

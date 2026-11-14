@@ -9,8 +9,14 @@ interface Env {
   STORAGE_SECRET: string;
 }
 
+/** Minimum delay between active expiry sweeps. */
+const SWEEP_INTERVAL_MS = 1000;
+
+const SWEEP_SQL = "DELETE FROM keys WHERE expires_at IS NOT NULL AND expires_at <= unixepoch()";
+
 export class StorageDurableObject extends DurableObject {
   private sql: SqlStorage;
+  private lastSweep = Date.now();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -39,6 +45,10 @@ export class StorageDurableObject extends DurableObject {
         sql: "CREATE TABLE IF NOT EXISTS sets (key TEXT NOT NULL REFERENCES keys(key) ON DELETE CASCADE, member TEXT NOT NULL, PRIMARY KEY (key, member))",
         params: [],
       },
+      {
+        sql: "CREATE INDEX IF NOT EXISTS keys_expires_at ON keys (expires_at) WHERE expires_at IS NOT NULL",
+        params: [],
+      },
     ];
 
     this.ctx.storage.transactionSync(() => {
@@ -46,25 +56,87 @@ export class StorageDurableObject extends DurableObject {
         this.sql.exec(statement.sql, ...statement.params).toArray();
       }
     });
+    this.lastSweep = Date.now();
   }
 
-  execBatch(statements: Statement[]): ResultRow[][] {
-    const results: ResultRow[][] = [];
-    this.ctx.storage.transactionSync(() => {
-      for (const { sql, params } of statements) {
-        results.push(this.sql.exec(sql, ...params).toArray());
-      }
-    });
+  /**
+   * Drops expired rows in the background of regular traffic. Commands already
+   * filter expired keys out, so this only reclaims space; failures (for example
+   * before `init()` has created the tables) are ignored on purpose.
+   */
+  private maybeSweep(): void {
+    const now = Date.now();
+    if (now - this.lastSweep < SWEEP_INTERVAL_MS) {
+      return;
+    }
+    this.lastSweep = now;
+    try {
+      this.sql.exec(SWEEP_SQL).toArray();
+    } catch {
+      // best effort
+    }
+  }
+
+  private run(statements: Statement[]): ResultRow[][] {
+    const results: ResultRow[][] = new Array(statements.length);
+    for (let i = 0; i < statements.length; i++) {
+      const { sql, params } = statements[i];
+      results[i] = this.sql.exec(sql, ...params).toArray();
+    }
     return results;
   }
 
-  execPipeline(batches: Statement[][]): ResultRow[][][] {
-    const pipelineResults: ResultRow[][][] = [];
-    for (const statements of batches) {
-      const batch = this.execBatch(statements);
-      pipelineResults.push(batch);
+  execBatch(statements: Statement[]): ResultRow[][] {
+    this.maybeSweep();
+    // A single statement is already atomic, so the explicit transaction only
+    // adds overhead.
+    if (statements.length <= 1) {
+      return this.run(statements);
     }
-    return pipelineResults;
+    return this.ctx.storage.transactionSync(() => this.run(statements));
+  }
+
+  execPipeline(batches: Statement[][]): ResultRow[][][] {
+    this.maybeSweep();
+    try {
+      return this.ctx.storage.transactionSync(() => batches.map((batch) => this.run(batch)));
+    } catch {
+      // The outer transaction rolled back, so replay command by command to keep
+      // the pre-existing semantics: commands before the failing one commit, and
+      // the original error is surfaced to the caller.
+      const pipelineResults: ResultRow[][][] = [];
+      for (const statements of batches) {
+        pipelineResults.push(this.execBatch(statements));
+      }
+      return pipelineResults;
+    }
+  }
+
+  private execPipelineItems(
+    pipeline: { statements: Statement[] }[]
+  ): (ResultRow[][] | { error: string })[] {
+    if (pipeline.every((item) => item && Array.isArray(item.statements))) {
+      try {
+        this.maybeSweep();
+        return this.ctx.storage.transactionSync(() =>
+          pipeline.map((item) => this.run(item.statements))
+        );
+      } catch {
+        // Fall through: the outer transaction rolled back, so the per-command
+        // replay below reproduces the original partial-success semantics.
+      }
+    }
+
+    return pipeline.map((item) => {
+      try {
+        if (!item || !Array.isArray(item.statements)) {
+          return { error: "ERR invalid statements" };
+        }
+        return this.execBatch(item.statements);
+      } catch (err) {
+        return { error: "ERR " + String(err) };
+      }
+    });
   }
 
   private unauthorized(): Response {
@@ -133,18 +205,7 @@ export class StorageDurableObject extends DurableObject {
         return this.jsonResponse({ error: "ERR invalid pipeline" }, 400);
       }
 
-      const results = pipeline.map((item) => {
-        try {
-          if (!item || !Array.isArray(item.statements)) {
-            return { error: "ERR invalid statements" };
-          }
-          return this.execBatch(item.statements);
-        } catch (err) {
-          return { error: "ERR " + String(err) };
-        }
-      });
-
-      return this.jsonResponse({ results });
+      return this.jsonResponse({ results: this.execPipelineItems(pipeline) });
     }
 
     return this.jsonResponse({ error: "ERR invalid request" }, 400);

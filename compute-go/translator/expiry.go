@@ -56,12 +56,10 @@ func translateExpireWith(args []string, cmd string, absolute bool) (Translation,
 		return Translation{}, errWrongArgs(cmd)
 	}
 
+	// A missing key and an unmet condition both reply 0, so no separate
+	// existence probe is needed: the UPDATE returns no rows in either case.
 	stmts := []Statement{
 		deleteIfExpired(key),
-		{
-			SQL:    "SELECT expires_at FROM keys WHERE key = ?",
-			Params: []any{key},
-		},
 		{
 			SQL:    updateSQL,
 			Params: params,
@@ -72,9 +70,6 @@ func translateExpireWith(args []string, cmd string, absolute bool) (Translation,
 		Statements: stmts,
 		MapResult: func(results [][]map[string]any) (any, error) {
 			if len(results[1]) == 0 {
-				return int64(0), nil
-			}
-			if len(results[2]) == 0 {
 				return int64(0), nil
 			}
 			return int64(1), nil
@@ -97,9 +92,8 @@ func translateTTLWith(args []string, cmd string, millis bool) (Translation, erro
 
 	key := args[0]
 	stmts := []Statement{
-		deleteIfExpired(key),
 		{
-			SQL:    "SELECT expires_at, unixepoch() as now FROM keys WHERE key = ?",
+			SQL:    "SELECT expires_at, unixepoch() AS now FROM keys WHERE key = ? AND " + liveKey,
 			Params: []any{key},
 		},
 	}
@@ -107,10 +101,10 @@ func translateTTLWith(args []string, cmd string, millis bool) (Translation, erro
 	return Translation{
 		Statements: stmts,
 		MapResult: func(results [][]map[string]any) (any, error) {
-			if len(results[1]) == 0 {
+			if len(results[0]) == 0 {
 				return int64(-2), nil
 			}
-			row := results[1][0]
+			row := results[0][0]
 			expiresValue, ok := row["expires_at"]
 			if !ok || expiresValue == nil {
 				return int64(-1), nil

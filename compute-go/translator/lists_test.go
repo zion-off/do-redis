@@ -10,11 +10,14 @@ func TestTranslateListCounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Translate error: %v", err)
 	}
-	if len(lpush.Statements) != 6 {
-		t.Fatalf("expected 6 statements, got %d", len(lpush.Statements))
+	if len(lpush.Statements) != 5 {
+		t.Fatalf("expected 5 statements, got %d", len(lpush.Statements))
 	}
-	results := make([][]map[string]any, 6)
-	results[5] = []map[string]any{{"count": "2"}}
+	if !hasQuotedIndex(lpush.Statements[3].SQL) {
+		t.Fatalf("expected quoted index in LPUSH SQL")
+	}
+	results := make([][]map[string]any, 5)
+	results[4] = []map[string]any{{"count": "2"}}
 	value, err := lpush.MapResult(results)
 	if err != nil {
 		t.Fatalf("MapResult error: %v", err)
@@ -73,8 +76,13 @@ func TestTranslateLRange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Translate error: %v", err)
 	}
-	results := make([][]map[string]any, 3)
-	results[2] = []map[string]any{{"value": "a"}, {"value": "b"}, {"value": "c"}, {"value": "d"}}
+	results := make([][]map[string]any, 1)
+	results[0] = []map[string]any{
+		{"type": "list", "value": "a"},
+		{"type": "list", "value": "b"},
+		{"type": "list", "value": "c"},
+		{"type": "list", "value": "d"},
+	}
 	value, err := translation.MapResult(results)
 	if err != nil {
 		t.Fatalf("MapResult error: %v", err)

@@ -7,12 +7,11 @@ func TestTranslateExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Translate error: %v", err)
 	}
-	if len(expire.Statements) != 3 {
-		t.Fatalf("expected 3 statements, got %d", len(expire.Statements))
+	if len(expire.Statements) != 2 {
+		t.Fatalf("expected 2 statements, got %d", len(expire.Statements))
 	}
-	results := make([][]map[string]any, 3)
-	results[1] = []map[string]any{{"expires_at": 1}}
-	results[2] = []map[string]any{{"key": "k"}}
+	results := make([][]map[string]any, 2)
+	results[1] = []map[string]any{{"key": "k"}}
 	value, err := expire.MapResult(results)
 	if err != nil {
 		t.Fatalf("MapResult error: %v", err)
@@ -38,8 +37,8 @@ func TestTranslateExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Translate error: %v", err)
 	}
-	results = make([][]map[string]any, 2)
-	results[1] = []map[string]any{{"expires_at": "110", "now": "100"}}
+	results = make([][]map[string]any, 1)
+	results[0] = []map[string]any{{"expires_at": "110", "now": "100"}}
 	value, err = ttl.MapResult(results)
 	if err != nil {
 		t.Fatalf("MapResult error: %v", err)
@@ -60,7 +59,7 @@ func TestTranslateExpiry(t *testing.T) {
 		t.Fatalf("expected 10000, got %v", value)
 	}
 
-	missingResults := make([][]map[string]any, 2)
+	missingResults := make([][]map[string]any, 1)
 	value, err = ttl.MapResult(missingResults)
 	if err != nil {
 		t.Fatalf("MapResult error: %v", err)
@@ -69,8 +68,8 @@ func TestTranslateExpiry(t *testing.T) {
 		t.Fatalf("expected -2, got %v", value)
 	}
 
-	persistentResults := make([][]map[string]any, 2)
-	persistentResults[1] = []map[string]any{{"expires_at": nil, "now": "100"}}
+	persistentResults := make([][]map[string]any, 1)
+	persistentResults[0] = []map[string]any{{"expires_at": nil, "now": "100"}}
 	value, err = ttl.MapResult(persistentResults)
 	if err != nil {
 		t.Fatalf("MapResult error: %v", err)

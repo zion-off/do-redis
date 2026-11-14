@@ -6,7 +6,7 @@ describe("sets translator", () => {
   it("SADD inserts members in one statement", () => {
     const translation = translate(["SADD", "k", "a", "b"]);
     expect(translation.statements).toHaveLength(4);
-    expect(translation.statements[3].params).toEqual(["k", "a", "k", "b"]);
+    expect(translation.statements[3].params).toEqual(["k", "a", "k", "b", "k"]);
     const results: ResultRow[][] = [[], [], [], [{ member: "a" }, { member: "b" }]];
     expect(translation.mapResult(results)).toBe(2);
   });

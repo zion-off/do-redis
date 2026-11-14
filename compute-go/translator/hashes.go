@@ -95,8 +95,9 @@ func translateHSet(args []string) (Translation, error) {
 			params = append(params, key, field, pairs[field])
 			tuples = append(tuples, "(?, ?, ?)")
 		}
+		params = append(params, key)
 		stmts = append(stmts, Statement{
-			SQL:    "INSERT INTO hashes (key, field, value) VALUES " + strings.Join(tuples, ", ") + " ON CONFLICT(key, field) DO UPDATE SET value = excluded.value",
+			SQL:    "INSERT INTO hashes (key, field, value) SELECT column1, column2, column3 FROM (VALUES " + strings.Join(tuples, ", ") + ") WHERE " + keyHasType("hash") + " ON CONFLICT(key, field) DO UPDATE SET value = excluded.value",
 			Params: params,
 		})
 	}
@@ -144,9 +145,10 @@ func translateHDel(args []string) (Translation, error) {
 		params := make([]any, 0, len(group)+1)
 		params = append(params, key)
 		params = append(params, toAnySlice(group)...)
+		params = append(params, key)
 		deleteIndexes = append(deleteIndexes, len(stmts))
 		stmts = append(stmts, Statement{
-			SQL:    "DELETE FROM hashes WHERE key = ? AND field IN (" + placeholders(len(group)) + ") RETURNING field",
+			SQL:    "DELETE FROM hashes WHERE key = ? AND field IN (" + placeholders(len(group)) + ") AND " + keyHasType("hash") + " RETURNING field",
 			Params: params,
 		})
 	}

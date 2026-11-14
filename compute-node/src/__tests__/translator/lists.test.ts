@@ -12,7 +12,7 @@ describe("lists translator", () => {
   it("LPUSH pushes every value in one statement", () => {
     const translation = translate(["LPUSH", "k", "a", "b"]);
     expect(translation.statements).toHaveLength(5);
-    expect(translation.statements[3].params).toEqual(["k", "k", 1, "a", 2, "b"]);
+    expect(translation.statements[3].params).toEqual(["k", "k", 1, "a", 2, "b", "k"]);
     expectIndexQuoted(translation.statements[3].sql);
     const results: ResultRow[][] = [[], [], [], [], [{ count: "2" }]];
     expect(translation.mapResult(results)).toBe(2);

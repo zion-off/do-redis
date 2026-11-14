@@ -60,7 +60,7 @@ func TestTranslateHSetCountsNewFields(t *testing.T) {
 		t.Fatalf("Translate error: %v", err)
 	}
 	last := hset.Statements[len(hset.Statements)-1]
-	if len(last.Params) != 3 || last.Params[2] != "2" {
+	if len(last.Params) != 4 || last.Params[2] != "2" {
 		t.Fatalf("expected the last value to win, got %v", last.Params)
 	}
 	results := make([][]map[string]any, len(hset.Statements))

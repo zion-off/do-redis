@@ -13,7 +13,7 @@ describe("hashes translator", () => {
   it("HSET keeps the last value for repeated fields", () => {
     const translation = translate(["HSET", "k", "f", "1", "f", "2"]);
     const upsert = translation.statements[translation.statements.length - 1];
-    expect(upsert.params).toEqual(["k", "f", "2"]);
+    expect(upsert.params).toEqual(["k", "f", "2", "k"]);
     expect(translation.mapResult([[], [], [], []])).toBe(1);
   });
 
@@ -34,7 +34,7 @@ describe("hashes translator", () => {
   it("HDEL collapses fields into one delete", () => {
     const translation = translate(["HDEL", "k", "a", "b", "a"]);
     expect(translation.statements).toHaveLength(3);
-    expect(translation.statements[2].params).toEqual(["k", "a", "b"]);
+    expect(translation.statements[2].params).toEqual(["k", "a", "b", "k"]);
     expect(translation.mapResult([[], [], [{ field: "a" }]])).toBe(1);
   });
 

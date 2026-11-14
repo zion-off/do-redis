@@ -29,9 +29,10 @@ func translateSAdd(args []string) (Translation, error) {
 			params = append(params, key, member)
 			tuples = append(tuples, "(?, ?)")
 		}
+		params = append(params, key)
 		insertIndexes = append(insertIndexes, len(stmts))
 		stmts = append(stmts, Statement{
-			SQL:    "INSERT OR IGNORE INTO sets (key, member) VALUES " + strings.Join(tuples, ", ") + " RETURNING member",
+			SQL:    "INSERT OR IGNORE INTO sets (key, member) SELECT column1, column2 FROM (VALUES " + strings.Join(tuples, ", ") + ") WHERE " + keyHasType("set") + " RETURNING member",
 			Params: params,
 		})
 	}
@@ -71,15 +72,16 @@ func translateSRem(args []string) (Translation, error) {
 		params := make([]any, 0, len(group)+1)
 		params = append(params, key)
 		params = append(params, toAnySlice(group)...)
+		params = append(params, key)
 		deleteIndexes = append(deleteIndexes, len(stmts))
 		stmts = append(stmts, Statement{
-			SQL:    "DELETE FROM sets WHERE key = ? AND member IN (" + placeholders(len(group)) + ") RETURNING member",
+			SQL:    "DELETE FROM sets WHERE key = ? AND member IN (" + placeholders(len(group)) + ") AND " + keyHasType("set") + " RETURNING member",
 			Params: params,
 		})
 	}
 
 	stmts = append(stmts, Statement{
-		SQL:    "DELETE FROM keys WHERE key = ? AND NOT EXISTS (SELECT 1 FROM sets WHERE key = ?)",
+		SQL:    "DELETE FROM keys WHERE key = ? AND type = 'set' AND NOT EXISTS (SELECT 1 FROM sets WHERE key = ?)",
 		Params: []any{key, key},
 	})
 

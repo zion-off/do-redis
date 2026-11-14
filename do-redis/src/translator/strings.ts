@@ -6,6 +6,7 @@ import {
   checkKeyType,
   chunk,
   deleteIfExpired,
+  keyHasType,
   parseIntStrict,
   placeholders,
   rowString,
@@ -322,8 +323,10 @@ function translateIncrByDelta(args: string[], delta: number, cmd: string): Trans
       params: [key, key],
     },
     {
-      sql: "UPDATE strings SET value = CAST(CAST(value AS INTEGER) + ? AS INTEGER) WHERE key = ? AND CAST(CAST(value AS INTEGER) AS TEXT) = value RETURNING value",
-      params: [delta, key],
+      sql: `UPDATE strings SET value = CAST(CAST(value AS INTEGER) + ? AS INTEGER) WHERE key = ? AND ${keyHasType(
+        "string"
+      )} AND CAST(CAST(value AS INTEGER) AS TEXT) = value RETURNING value`,
+      params: [delta, key, key],
     },
   ];
 

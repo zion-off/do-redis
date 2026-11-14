@@ -61,10 +61,10 @@ func TestTranslateSetVariants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Translate error: %v", err)
 	}
-	if len(xx.Statements) != 3 {
-		t.Fatalf("expected 3 statements, got %d", len(xx.Statements))
+	if len(xx.Statements) != 6 {
+		t.Fatalf("expected 6 statements, got %d", len(xx.Statements))
 	}
-	results = make([][]map[string]any, 3)
+	results = make([][]map[string]any, 6)
 	value, err = xx.MapResult(results)
 	if err != nil {
 		t.Fatalf("MapResult error: %v", err)

@@ -40,6 +40,16 @@ func translateGet(args []string) (Translation, error) {
 	}, nil
 }
 
+// clearOtherTypes drops rows left over from a previous non-string type: XX and
+// KEEPTTL retype an existing key in place, so the cascade never runs.
+func clearOtherTypes(key string) []Statement {
+	stmts := make([]Statement, 0, 3)
+	for _, table := range []string{"hashes", "lists", "sets"} {
+		stmts = append(stmts, Statement{SQL: "DELETE FROM " + table + " WHERE key = ?", Params: []any{key}})
+	}
+	return stmts
+}
+
 func translateSet(args []string) (Translation, error) {
 	if len(args) < 2 {
 		return Translation{}, errWrongArgs("set")
@@ -102,6 +112,7 @@ func translateSet(args []string) (Translation, error) {
 			},
 		)
 	case options.xx:
+		stmts = append(stmts, clearOtherTypes(key)...)
 		okIndex = len(stmts)
 		if options.keepTTL {
 			stmts = append(stmts, Statement{
@@ -120,6 +131,7 @@ func translateSet(args []string) (Translation, error) {
 		})
 	default:
 		if options.keepTTL {
+			stmts = append(stmts, clearOtherTypes(key)...)
 			stmts = append(stmts,
 				Statement{
 					SQL:    "UPDATE keys SET type = 'string' WHERE key = ? RETURNING key",

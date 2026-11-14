@@ -520,6 +520,8 @@ describe.skipIf(!Database)("end-to-end behavior on real sqlite", () => {
       expect(db.run(["GET", "l"])).toBe("x");
       expect(db.run(["TTL", "l"])).toBeGreaterThan(0);
       expect(db.command(["HSET", "h", "f", "v"])).toEqual(WRONGTYPE);
+      expect(db.rows("SELECT key FROM hashes")).toHaveLength(0);
+      expect(db.rows("SELECT key FROM lists")).toHaveLength(0);
     });
 
     it("DEL, EXPIRE and PERSIST work on any type", () => {

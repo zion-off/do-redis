@@ -90,9 +90,7 @@ func TestHandlerNumericArgs(t *testing.T) {
 			return
 		}
 		writeStorageResults(w, [][]map[string]any{
-			{},
-			{},
-			{{"value": "a"}, {"value": "b"}},
+			{{"type": "list", "value": "a"}, {"type": "list", "value": "b"}},
 		})
 	})
 	defer server.Close()

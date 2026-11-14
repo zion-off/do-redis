@@ -1,10 +1,43 @@
 import type { Statement, Translation } from "./types";
 import { ErrNotInteger, ErrWrongType, errWrongArgs } from "./errors";
-import { deleteIfExpired, parseIntStrict, rowString, wrongTypeFor } from "./helpers";
+import {
+  MAX_ITEMS_PER_STATEMENT,
+  checkKeyType,
+  chunk,
+  deleteIfExpired,
+  parseIntStrict,
+  rowString,
+  rowStringOrNull,
+  wrongTypeFor,
+} from "./helpers";
 
-export function translateLPush(args: string[]): Translation {
+const LIVE_KEY_LOOKUP = "k.key = ? AND (k.expires_at IS NULL OR k.expires_at > unixepoch())";
+
+function pushStatement(key: string, values: string[], left: boolean): Statement {
+  // One statement per batch: the anchor index is read once as an aggregate
+  // sub-select and each value gets its own offset from it.
+  const rows = values
+    .map((_, position) => (position === 0 ? "SELECT ? AS ord, ? AS val" : "SELECT ?, ?"))
+    .join(" UNION ALL ");
+  const params: unknown[] = [key, key];
+  for (let i = 0; i < values.length; i++) {
+    params.push(i + 1, values[i]);
+  }
+
+  const anchor = left
+    ? 'COALESCE(MIN("index"), 1.0) AS base'
+    : 'COALESCE(MAX("index"), 0.0) AS base';
+  const offset = left ? "b.base - v.ord" : "b.base + v.ord";
+
+  return {
+    sql: `INSERT INTO lists (key, "index", value) SELECT ?, ${offset}, v.val FROM (SELECT ${anchor} FROM lists WHERE key = ?) AS b, (${rows}) AS v`,
+    params,
+  };
+}
+
+function translatePush(args: string[], cmd: string, left: boolean): Translation {
   if (args.length < 2) {
-    throw errWrongArgs("lpush");
+    throw errWrongArgs(cmd);
   }
 
   const key = args[0];
@@ -15,15 +48,12 @@ export function translateLPush(args: string[]): Translation {
     { sql: "INSERT OR IGNORE INTO keys (key, type) VALUES (?, 'list')", params: [key] },
   ];
 
-  for (const value of values) {
-    statements.push({
-      sql: 'INSERT INTO lists (key, "index", value) SELECT ?, COALESCE(MIN("index"), 1.0) - 1.0, ? FROM lists WHERE key = ?',
-      params: [key, value, key],
-    });
+  for (const group of chunk(values, MAX_ITEMS_PER_STATEMENT)) {
+    statements.push(pushStatement(key, group, left));
   }
 
   const countIndex = statements.length;
-  statements.push({ sql: "SELECT COUNT(*) as count FROM lists WHERE key = ?", params: [key] });
+  statements.push({ sql: "SELECT COUNT(*) AS count FROM lists WHERE key = ?", params: [key] });
 
   return {
     statements,
@@ -43,45 +73,12 @@ export function translateLPush(args: string[]): Translation {
   };
 }
 
+export function translateLPush(args: string[]): Translation {
+  return translatePush(args, "lpush", true);
+}
+
 export function translateRPush(args: string[]): Translation {
-  if (args.length < 2) {
-    throw errWrongArgs("rpush");
-  }
-
-  const key = args[0];
-  const values = args.slice(1);
-  const statements: Statement[] = [
-    deleteIfExpired(key),
-    { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
-    { sql: "INSERT OR IGNORE INTO keys (key, type) VALUES (?, 'list')", params: [key] },
-  ];
-
-  for (const value of values) {
-    statements.push({
-      sql: 'INSERT INTO lists (key, "index", value) SELECT ?, COALESCE(MAX("index"), 0.0) + 1.0, ? FROM lists WHERE key = ?',
-      params: [key, value, key],
-    });
-  }
-
-  const countIndex = statements.length;
-  statements.push({ sql: "SELECT COUNT(*) as count FROM lists WHERE key = ?", params: [key] });
-
-  return {
-    statements,
-    mapResult: (results) => {
-      if (wrongTypeFor(results, 1, "list")) {
-        throw ErrWrongType;
-      }
-      if (results[countIndex].length === 0) {
-        return 0;
-      }
-      const count = parseIntStrict(rowString(results[countIndex][0], "count"));
-      if (count === null) {
-        throw ErrNotInteger;
-      }
-      return count;
-    },
-  };
+  return translatePush(args, "rpush", false);
 }
 
 function translatePop(args: string[], cmd: string, left: boolean): Translation {
@@ -180,22 +177,31 @@ export function translateLRange(args: string[]): Translation {
   }
 
   const statements: Statement[] = [
-    deleteIfExpired(key),
-    { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
-    { sql: 'SELECT value FROM lists WHERE key = ? ORDER BY "index" ASC', params: [key] },
+    {
+      sql: `SELECT k.type AS type, l.value AS value FROM keys k LEFT JOIN lists l ON l.key = k.key WHERE ${LIVE_KEY_LOOKUP} ORDER BY l."index" ASC`,
+      params: [key],
+    },
   ];
 
   return {
     statements,
     mapResult: (results) => {
-      if (wrongTypeFor(results, 1, "list")) {
-        throw ErrWrongType;
-      }
-      if (results[2].length === 0) {
+      const rows = results[0];
+      if (!checkKeyType(rows, "list")) {
         return [];
       }
-      const values = results[2].map((row) => rowString(row, "value"));
+      const values: string[] = [];
+      for (const row of rows) {
+        const value = rowStringOrNull(row, "value");
+        if (value === null) {
+          continue;
+        }
+        values.push(value);
+      }
       const length = values.length;
+      if (length === 0) {
+        return [];
+      }
       let startIndex = start;
       let stopIndex = stop;
       if (startIndex < 0) {
@@ -225,21 +231,20 @@ export function translateLLen(args: string[]): Translation {
 
   const key = args[0];
   const statements: Statement[] = [
-    deleteIfExpired(key),
-    { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
-    { sql: "SELECT COUNT(*) as count FROM lists WHERE key = ?", params: [key] },
+    {
+      sql: `SELECT k.type AS type, (SELECT COUNT(*) FROM lists l WHERE l.key = k.key) AS count FROM keys k WHERE ${LIVE_KEY_LOOKUP}`,
+      params: [key],
+    },
   ];
 
   return {
     statements,
     mapResult: (results) => {
-      if (wrongTypeFor(results, 1, "list")) {
-        throw ErrWrongType;
-      }
-      if (results[2].length === 0) {
+      const rows = results[0];
+      if (!checkKeyType(rows, "list")) {
         return 0;
       }
-      const count = parseIntStrict(rowString(results[2][0], "count"));
+      const count = parseIntStrict(rowString(rows[0], "count"));
       if (count === null) {
         throw ErrNotInteger;
       }

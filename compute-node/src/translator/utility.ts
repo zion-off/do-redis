@@ -71,6 +71,33 @@ function pathMatch(pattern: string, value: string): boolean {
   return new RegExp(regex).test(value);
 }
 
+/**
+ * Longest literal prefix of a glob pattern, limited to printable ASCII so the
+ * derived key range is safe under SQLite's BINARY collation.
+ */
+function literalPrefix(pattern: string): string {
+  let prefix = "";
+  for (let i = 0; i < pattern.length; i++) {
+    let ch = pattern[i];
+    if (ch === "*" || ch === "?" || ch === "[") {
+      break;
+    }
+    if (ch === "\\") {
+      if (i + 1 >= pattern.length) {
+        return "";
+      }
+      ch = pattern[i + 1];
+      i++;
+    }
+    const code = ch.charCodeAt(0);
+    if (code < 0x20 || code >= 0x7e) {
+      break;
+    }
+    prefix += ch;
+  }
+  return prefix;
+}
+
 export function translatePing(args: string[]): Translation {
   if (args.length > 1) {
     throw errWrongArgs("ping");
@@ -131,12 +158,21 @@ export function translateKeys(args: string[]): Translation {
     throw errWrongArgs("keys");
   }
 
-  const statements: Statement[] = [
-    {
-      sql: "SELECT key FROM keys WHERE (expires_at IS NULL OR expires_at > unixepoch()) ORDER BY key",
-      params: [],
-    },
-  ];
+  // Any key matching the pattern has to start with its literal prefix, so the
+  // scan can be narrowed to a primary key range instead of reading every key.
+  const prefix = literalPrefix(pattern);
+  let sql =
+    "SELECT key FROM keys WHERE (expires_at IS NULL OR expires_at > unixepoch()) ORDER BY key";
+  let params: unknown[] = [];
+  if (prefix !== "") {
+    const upper =
+      prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
+    sql =
+      "SELECT key FROM keys WHERE key >= ? AND key < ? AND (expires_at IS NULL OR expires_at > unixepoch()) ORDER BY key";
+    params = [prefix, upper];
+  }
+
+  const statements: Statement[] = [{ sql, params }];
 
   return {
     statements,

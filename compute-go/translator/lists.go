@@ -3,61 +3,47 @@ package translator
 import (
 	"sort"
 	"strconv"
+	"strings"
 )
 
 func translateLPush(args []string) (Translation, error) {
-	if len(args) < 2 {
-		return Translation{}, errWrongArgs("lpush")
-	}
-
-	key := args[0]
-	values := args[1:]
-	stmts := []Statement{
-		deleteIfExpired(key),
-		{
-			SQL:    "SELECT type FROM keys WHERE key = ?",
-			Params: []any{key},
-		},
-		{
-			SQL:    "INSERT OR IGNORE INTO keys (key, type) VALUES (?, 'list')",
-			Params: []any{key},
-		},
-	}
-
-	for _, value := range values {
-		stmts = append(stmts, Statement{
-			SQL:    `INSERT INTO lists (key, "index", value) SELECT ?, COALESCE(MIN("index"), 1.0) - 1.0, ? FROM lists WHERE key = ?`,
-			Params: []any{key, value, key},
-		})
-	}
-
-	countIndex := len(stmts)
-	stmts = append(stmts, Statement{
-		SQL:    "SELECT COUNT(*) as count FROM lists WHERE key = ?",
-		Params: []any{key},
-	})
-
-	return Translation{
-		Statements: stmts,
-		MapResult: func(results [][]map[string]any) (any, error) {
-			if wrongTypeFor(results, 1, "list") {
-				return nil, ErrWrongType
-			}
-			if len(results[countIndex]) == 0 {
-				return int64(0), nil
-			}
-			count, ok := parseInt64(rowString(results[countIndex][0], "count"))
-			if !ok {
-				return nil, ErrNotInteger
-			}
-			return count, nil
-		},
-	}, nil
+	return translatePush(args, "lpush", true)
 }
 
 func translateRPush(args []string) (Translation, error) {
+	return translatePush(args, "rpush", false)
+}
+
+// pushStatement inserts a batch of values in one statement: the anchor index is
+// read once as an aggregate sub-select and each value gets its own offset.
+func pushStatement(key string, values []string, left bool) Statement {
+	rows := make([]string, 0, len(values))
+	params := []any{key, key}
+	for i, value := range values {
+		if i == 0 {
+			rows = append(rows, "SELECT ? AS ord, ? AS val")
+		} else {
+			rows = append(rows, "SELECT ?, ?")
+		}
+		params = append(params, i+1, value)
+	}
+
+	anchor := `COALESCE(MAX("index"), 0.0) AS base`
+	offset := "b.base + v.ord"
+	if left {
+		anchor = `COALESCE(MIN("index"), 1.0) AS base`
+		offset = "b.base - v.ord"
+	}
+
+	return Statement{
+		SQL:    `INSERT INTO lists (key, "index", value) SELECT ?, ` + offset + ", v.val FROM (SELECT " + anchor + " FROM lists WHERE key = ?) AS b, (" + strings.Join(rows, " UNION ALL ") + ") AS v",
+		Params: params,
+	}
+}
+
+func translatePush(args []string, cmd string, left bool) (Translation, error) {
 	if len(args) < 2 {
-		return Translation{}, errWrongArgs("rpush")
+		return Translation{}, errWrongArgs(cmd)
 	}
 
 	key := args[0]
@@ -74,16 +60,13 @@ func translateRPush(args []string) (Translation, error) {
 		},
 	}
 
-	for _, value := range values {
-		stmts = append(stmts, Statement{
-			SQL:    `INSERT INTO lists (key, "index", value) SELECT ?, COALESCE(MAX("index"), 0.0) + 1.0, ? FROM lists WHERE key = ?`,
-			Params: []any{key, value, key},
-		})
+	for _, group := range chunkStrings(values, maxItemsPerStatement) {
+		stmts = append(stmts, pushStatement(key, group, left))
 	}
 
 	countIndex := len(stmts)
 	stmts = append(stmts, Statement{
-		SQL:    "SELECT COUNT(*) as count FROM lists WHERE key = ?",
+		SQL:    "SELECT COUNT(*) AS count FROM lists WHERE key = ?",
 		Params: []any{key},
 	})
 
@@ -236,13 +219,8 @@ func translateLRange(args []string) (Translation, error) {
 	}
 
 	stmts := []Statement{
-		deleteIfExpired(key),
 		{
-			SQL:    "SELECT type FROM keys WHERE key = ?",
-			Params: []any{key},
-		},
-		{
-			SQL:    `SELECT value FROM lists WHERE key = ? ORDER BY "index" ASC`,
+			SQL:    "SELECT k.type AS type, l.value AS value FROM keys k LEFT JOIN lists l ON l.key = k.key WHERE " + liveKeyLookup + ` ORDER BY l."index" ASC`,
 			Params: []any{key},
 		},
 	}
@@ -250,15 +228,24 @@ func translateLRange(args []string) (Translation, error) {
 	return Translation{
 		Statements: stmts,
 		MapResult: func(results [][]map[string]any) (any, error) {
-			if wrongTypeFor(results, 1, "list") {
-				return nil, ErrWrongType
+			rows := results[0]
+			found, err := checkKeyType(rows, "list")
+			if err != nil {
+				return nil, err
 			}
-			if len(results[2]) == 0 {
+			if !found {
 				return []any{}, nil
 			}
-			values := make([]string, 0, len(results[2]))
-			for _, row := range results[2] {
-				values = append(values, rowString(row, "value"))
+			values := make([]string, 0, len(rows))
+			for _, row := range rows {
+				value, ok := rowStringOrNull(row, "value")
+				if !ok {
+					continue
+				}
+				values = append(values, value)
+			}
+			if len(values) == 0 {
+				return []any{}, nil
 			}
 
 			length := len(values)
@@ -296,13 +283,8 @@ func translateLLen(args []string) (Translation, error) {
 
 	key := args[0]
 	stmts := []Statement{
-		deleteIfExpired(key),
 		{
-			SQL:    "SELECT type FROM keys WHERE key = ?",
-			Params: []any{key},
-		},
-		{
-			SQL:    "SELECT COUNT(*) as count FROM lists WHERE key = ?",
+			SQL:    "SELECT k.type AS type, (SELECT COUNT(*) FROM lists l WHERE l.key = k.key) AS count FROM keys k WHERE " + liveKeyLookup,
 			Params: []any{key},
 		},
 	}
@@ -310,13 +292,15 @@ func translateLLen(args []string) (Translation, error) {
 	return Translation{
 		Statements: stmts,
 		MapResult: func(results [][]map[string]any) (any, error) {
-			if wrongTypeFor(results, 1, "list") {
-				return nil, ErrWrongType
+			rows := results[0]
+			found, err := checkKeyType(rows, "list")
+			if err != nil {
+				return nil, err
 			}
-			if len(results[2]) == 0 {
+			if !found {
 				return int64(0), nil
 			}
-			count, ok := parseInt64(rowString(results[2][0], "count"))
+			count, ok := parseInt64(rowString(rows[0], "count"))
 			if !ok {
 				return nil, ErrNotInteger
 			}

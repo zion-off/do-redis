@@ -44,23 +44,13 @@ export function translateExpireWith(args: string[], cmd: string, absolute: boole
       throw errWrongArgs(cmd);
   }
 
-  const statements: Statement[] = [
-    deleteIfExpired(key),
-    { sql: "SELECT expires_at FROM keys WHERE key = ?", params: [key] },
-    { sql: updateSQL, params },
-  ];
+  // A missing key and an unmet condition both reply 0, so no separate existence
+  // probe is needed: the UPDATE returns no rows in either case.
+  const statements: Statement[] = [deleteIfExpired(key), { sql: updateSQL, params }];
 
   return {
     statements,
-    mapResult: (results) => {
-      if (results[1].length === 0) {
-        return 0;
-      }
-      if (results[2].length === 0) {
-        return 0;
-      }
-      return 1;
-    },
+    mapResult: (results) => (results[1].length === 0 ? 0 : 1),
   };
 }
 
@@ -79,17 +69,19 @@ export function translateTTLWith(args: string[], cmd: string, millis: boolean): 
 
   const key = args[0];
   const statements: Statement[] = [
-    deleteIfExpired(key),
-    { sql: "SELECT expires_at, unixepoch() as now FROM keys WHERE key = ?", params: [key] },
+    {
+      sql: "SELECT expires_at, unixepoch() AS now FROM keys WHERE key = ? AND (expires_at IS NULL OR expires_at > unixepoch())",
+      params: [key],
+    },
   ];
 
   return {
     statements,
     mapResult: (results) => {
-      if (results[1].length === 0) {
+      if (results[0].length === 0) {
         return -2;
       }
-      const row = results[1][0];
+      const row = results[0][0];
       const expiresValue = row["expires_at"];
       if (expiresValue === null || expiresValue === undefined) {
         return -1;

@@ -25,16 +25,21 @@ type SqlExec = (sql: string, ...params: unknown[]) => ExecResult;
 type StorageCtx = {
   storage: {
     sql: { exec: SqlExec };
-    transactionSync: (fn: () => void) => void;
+    transactionSync: <T>(fn: () => T) => T;
   };
 };
 
-function makeCtx(exec: SqlExec): StorageCtx {
+function makeCtx(exec: SqlExec): StorageCtx & { transactions: () => number } {
+  let transactions = 0;
   return {
     storage: {
       sql: { exec },
-      transactionSync: (fn: () => void) => fn(),
+      transactionSync: <T>(fn: () => T): T => {
+        transactions++;
+        return fn();
+      },
     },
+    transactions: () => transactions,
   };
 }
 
@@ -47,13 +52,14 @@ describe("StorageDurableObject", () => {
 
     storage.init();
 
-    expect(exec).toHaveBeenCalledTimes(5);
+    expect(exec).toHaveBeenCalledTimes(6);
     const calls = exec.mock.calls.map((call) => call[0]);
     expect(calls[0]).toContain("CREATE TABLE IF NOT EXISTS keys");
     expect(calls[1]).toContain("CREATE TABLE IF NOT EXISTS strings");
     expect(calls[2]).toContain("CREATE TABLE IF NOT EXISTS hashes");
     expect(calls[3]).toContain("CREATE TABLE IF NOT EXISTS lists");
     expect(calls[4]).toContain("CREATE TABLE IF NOT EXISTS sets");
+    expect(calls[5]).toContain("CREATE INDEX IF NOT EXISTS keys_expires_at");
   });
 
   it("execBatch runs statements in order", () => {
@@ -74,20 +80,45 @@ describe("StorageDurableObject", () => {
     expect(results).toEqual([[{ a: 1 }], [{ b: 2 }]]);
   });
 
-  it("execPipeline executes batches", () => {
+  it("execPipeline runs every batch in a single transaction", () => {
     const exec = vi.fn<SqlExec>(() => ({ toArray: () => [] }));
-    const ctx = makeCtx(exec) as unknown as DurableObjectState;
+    const fake = makeCtx(exec);
+    const ctx = fake as unknown as DurableObjectState;
     const env: StorageEnv = { STORAGE_SECRET: "secret", STORAGE: {} as DurableObjectNamespace };
     const storage = new StorageDurableObject(ctx, env);
-    const execBatchSpy = vi.spyOn(storage, "execBatch");
 
     const results = storage.execPipeline([
       [{ sql: "SELECT 1", params: [] }],
       [{ sql: "SELECT 2", params: [] }],
     ]);
 
-    expect(execBatchSpy).toHaveBeenCalledTimes(2);
     expect(results).toEqual([[[]], [[]]]);
+    expect(exec).toHaveBeenCalledTimes(2);
+    expect(fake.transactions()).toBe(1);
+  });
+
+  it("execPipeline replays batch by batch when a statement fails", () => {
+    let calls = 0;
+    const exec = vi.fn<SqlExec>(() => {
+      calls++;
+      // fail only while the whole pipeline runs as one transaction
+      if (calls === 2) {
+        throw new Error("boom");
+      }
+      return { toArray: () => [] };
+    });
+    const fake = makeCtx(exec);
+    const ctx = fake as unknown as DurableObjectState;
+    const env: StorageEnv = { STORAGE_SECRET: "secret", STORAGE: {} as DurableObjectNamespace };
+    const storage = new StorageDurableObject(ctx, env);
+
+    const results = storage.execPipeline([
+      [{ sql: "SELECT 1", params: [] }],
+      [{ sql: "SELECT 2", params: [] }],
+    ]);
+
+    expect(results).toEqual([[[]], [[]]]);
+    expect(fake.transactions()).toBe(1);
   });
 
   it("rejects missing or wrong auth", async () => {
@@ -133,7 +164,6 @@ describe("StorageDurableObject", () => {
     const ctx = makeCtx(exec) as unknown as DurableObjectState;
     const env: StorageEnv = { STORAGE_SECRET: "secret", STORAGE: {} as DurableObjectNamespace };
     const storage = new StorageDurableObject(ctx, env);
-    const execBatchSpy = vi.spyOn(storage, "execBatch");
 
     const response = await storage.fetch(
       new Request("http://localhost", {
@@ -149,7 +179,7 @@ describe("StorageDurableObject", () => {
     );
 
     const body = await response.json();
-    expect(execBatchSpy).toHaveBeenCalledTimes(2);
+    expect(exec).toHaveBeenCalledTimes(2);
     expect(body).toEqual({ results: [[[]], [[]]] });
   });
 });

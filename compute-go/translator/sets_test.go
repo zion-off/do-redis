@@ -7,12 +7,11 @@ func TestTranslateSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Translate error: %v", err)
 	}
-	if len(sadd.Statements) != 5 {
-		t.Fatalf("expected 5 statements, got %d", len(sadd.Statements))
+	if len(sadd.Statements) != 4 {
+		t.Fatalf("expected 4 statements, got %d", len(sadd.Statements))
 	}
-	results := make([][]map[string]any, 5)
-	results[3] = []map[string]any{{"member": "a"}}
-	results[4] = []map[string]any{{"member": "b"}}
+	results := make([][]map[string]any, 4)
+	results[3] = []map[string]any{{"member": "a"}, {"member": "b"}}
 	value, err := sadd.MapResult(results)
 	if err != nil {
 		t.Fatalf("MapResult error: %v", err)
@@ -25,8 +24,11 @@ func TestTranslateSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Translate error: %v", err)
 	}
-	results = make([][]map[string]any, 3)
-	results[2] = []map[string]any{{"member": "a"}, {"member": "b"}}
+	results = make([][]map[string]any, 1)
+	results[0] = []map[string]any{
+		{"type": "set", "member": "a"},
+		{"type": "set", "member": "b"},
+	}
 	value, err = smembers.MapResult(results)
 	if err != nil {
 		t.Fatalf("MapResult error: %v", err)

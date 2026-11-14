@@ -1,6 +1,17 @@
 import type { Statement, Translation, ResultRow } from "./types";
 import { ErrNotInteger, ErrWrongType, errWrongArgs } from "./errors";
-import { deleteIfExpired, parseIntStrict, rowString, wrongTypeFor } from "./helpers";
+import {
+  LIVE_KEY,
+  MAX_ITEMS_PER_STATEMENT,
+  checkKeyType,
+  chunk,
+  deleteIfExpired,
+  parseIntStrict,
+  placeholders,
+  rowString,
+  rowStringOrNull,
+  wrongTypeFor,
+} from "./helpers";
 
 function hasWrongType(results: ResultRow[][], index: number): boolean {
   return wrongTypeFor(results, index, "string");
@@ -98,21 +109,20 @@ export function translateGet(args: string[]): Translation {
 
   const key = args[0];
   const statements: Statement[] = [
-    deleteIfExpired(key),
-    { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
-    { sql: "SELECT value FROM strings WHERE key = ?", params: [key] },
+    {
+      sql: "SELECT k.type AS type, s.value AS value FROM keys k LEFT JOIN strings s ON s.key = k.key WHERE k.key = ? AND (k.expires_at IS NULL OR k.expires_at > unixepoch())",
+      params: [key],
+    },
   ];
 
   return {
     statements,
     mapResult: (results) => {
-      if (hasWrongType(results, 1)) {
-        throw ErrWrongType;
-      }
-      if (results[2].length === 0) {
+      const rows = results[0];
+      if (!checkKeyType(rows, "string")) {
         return null;
       }
-      return rowString(results[2][0], "value");
+      return rowStringOrNull(rows[0], "value");
     },
   };
 }
@@ -131,11 +141,27 @@ export function translateSet(args: string[]): Translation {
     expiresAt = options.expiresAt ?? null;
   }
 
-  const statements: Statement[] = [deleteIfExpired(key)];
+  const conditional = options.nx || options.xx;
+  const statements: Statement[] = [];
+
+  // The plain SET path replaces the key unconditionally, so a separate
+  // expired-key cleanup is redundant: the DELETE below removes the row (and its
+  // cascaded children) either way.
+  if (conditional || options.keepTTL) {
+    statements.push(deleteIfExpired(key));
+  }
+
   let getIndex = -1;
   if (options.get) {
     getIndex = statements.length;
-    statements.push({ sql: "SELECT value FROM strings WHERE key = ?", params: [key] });
+    if (conditional || options.keepTTL) {
+      statements.push({ sql: "SELECT value FROM strings WHERE key = ?", params: [key] });
+    } else {
+      statements.push({
+        sql: "SELECT s.value AS value FROM strings s JOIN keys k ON k.key = s.key WHERE s.key = ? AND (k.expires_at IS NULL OR k.expires_at > unixepoch())",
+        params: [key],
+      });
+    }
   }
 
   let okIndex = -1;
@@ -168,35 +194,33 @@ export function translateSet(args: string[]): Translation {
       sql: "INSERT OR REPLACE INTO strings (key, value) SELECT ?, ? WHERE changes() > 0",
       params: [key, value],
     });
+  } else if (options.keepTTL) {
+    statements.push(
+      {
+        sql: "UPDATE keys SET type = 'string' WHERE key = ? RETURNING key",
+        params: [key],
+      },
+      {
+        sql: "INSERT INTO keys (key, type) SELECT ?, 'string' WHERE changes() = 0",
+        params: [key],
+      },
+      {
+        sql: "INSERT OR REPLACE INTO strings (key, value) VALUES (?, ?)",
+        params: [key, value],
+      }
+    );
   } else {
-    if (options.keepTTL) {
-      statements.push(
-        {
-          sql: "UPDATE keys SET type = 'string' WHERE key = ? RETURNING key",
-          params: [key],
-        },
-        {
-          sql: "INSERT INTO keys (key, type) SELECT ?, 'string' WHERE changes() = 0",
-          params: [key],
-        },
-        {
-          sql: "INSERT OR REPLACE INTO strings (key, value) VALUES (?, ?)",
-          params: [key, value],
-        }
-      );
-    } else {
-      statements.push(
-        { sql: "DELETE FROM keys WHERE key = ?", params: [key] },
-        {
-          sql: "INSERT INTO keys (key, type, expires_at) VALUES (?, 'string', ?)",
-          params: [key, expiresAt],
-        },
-        {
-          sql: "INSERT INTO strings (key, value) VALUES (?, ?)",
-          params: [key, value],
-        }
-      );
-    }
+    statements.push(
+      { sql: "DELETE FROM keys WHERE key = ?", params: [key] },
+      {
+        sql: "INSERT INTO keys (key, type, expires_at) VALUES (?, 'string', ?)",
+        params: [key, expiresAt],
+      },
+      {
+        sql: "INSERT INTO strings (key, value) VALUES (?, ?)",
+        params: [key, value],
+      }
+    );
   }
 
   return {
@@ -227,9 +251,11 @@ export function translateDel(args: string[]): Translation {
     throw errWrongArgs("del");
   }
 
-  const statements = args.map((key) => ({
-    sql: "DELETE FROM keys WHERE key = ? RETURNING key",
-    params: [key],
+  // Expired-but-not-yet-swept rows are dropped too, but only live keys count
+  // towards the reply.
+  const statements = chunk([...new Set(args)], MAX_ITEMS_PER_STATEMENT).map((keys) => ({
+    sql: `DELETE FROM keys WHERE key IN (${placeholders(keys.length)}) RETURNING ${LIVE_KEY} AS live`,
+    params: keys as unknown[],
   }));
 
   return {
@@ -237,7 +263,11 @@ export function translateDel(args: string[]): Translation {
     mapResult: (results) => {
       let count = 0;
       for (const res of results) {
-        count += res.length;
+        for (const row of res) {
+          if (row["live"]) {
+            count++;
+          }
+        }
       }
       return count;
     },
@@ -249,17 +279,23 @@ export function translateExists(args: string[]): Translation {
     throw errWrongArgs("exists");
   }
 
-  const statements = args.map((key) => ({
-    sql: "SELECT 1 FROM keys WHERE key = ? AND (expires_at IS NULL OR expires_at > unixepoch())",
-    params: [key],
+  const statements = chunk([...new Set(args)], MAX_ITEMS_PER_STATEMENT).map((keys) => ({
+    sql: `SELECT key FROM keys WHERE key IN (${placeholders(keys.length)}) AND ${LIVE_KEY}`,
+    params: keys as unknown[],
   }));
 
   return {
     statements,
     mapResult: (results) => {
-      let count = 0;
+      const live = new Set<string>();
       for (const res of results) {
-        if (res.length > 0) {
+        for (const row of res) {
+          live.add(rowString(row, "key"));
+        }
+      }
+      let count = 0;
+      for (const key of args) {
+        if (live.has(key)) {
           count++;
         }
       }
@@ -276,10 +312,12 @@ function translateIncrByDelta(args: string[], delta: number, cmd: string): Trans
   const key = args[0];
   const statements: Statement[] = [
     deleteIfExpired(key),
-    { sql: "SELECT type FROM keys WHERE key = ?", params: [key] },
+    {
+      sql: "SELECT k.type AS type, s.value AS value FROM keys k LEFT JOIN strings s ON s.key = k.key WHERE k.key = ?",
+      params: [key],
+    },
     { sql: "INSERT OR IGNORE INTO keys (key, type) VALUES (?, 'string')", params: [key] },
     { sql: "INSERT OR IGNORE INTO strings (key, value) VALUES (?, '0')", params: [key] },
-    { sql: "SELECT value FROM strings WHERE key = ?", params: [key] },
     {
       sql: "UPDATE strings SET value = CAST(CAST(value AS INTEGER) + ? AS INTEGER) WHERE key = ? RETURNING value",
       params: [delta, key],
@@ -292,17 +330,16 @@ function translateIncrByDelta(args: string[], delta: number, cmd: string): Trans
       if (hasWrongType(results, 1)) {
         throw ErrWrongType;
       }
-      if (results[4].length === 0) {
-        throw ErrNotInteger;
-      }
-      const before = rowString(results[4][0], "value");
+      // Missing rows are materialised as '0' by the statements above.
+      const before =
+        results[1].length === 0 ? "0" : (rowStringOrNull(results[1][0], "value") ?? "0");
       if (parseIntStrict(before) === null) {
         throw ErrNotInteger;
       }
-      if (results[5].length === 0) {
+      if (results[4].length === 0) {
         throw ErrNotInteger;
       }
-      const after = rowString(results[5][0], "value");
+      const after = rowString(results[4][0], "value");
       const value = parseIntStrict(after);
       if (value === null) {
         throw ErrNotInteger;
@@ -347,25 +384,21 @@ export function translateMGet(args: string[]): Translation {
     throw errWrongArgs("mget");
   }
 
-  const statements: Statement[] = [];
-  for (const key of args) {
-    statements.push(deleteIfExpired(key));
-    statements.push({ sql: "SELECT value FROM strings WHERE key = ?", params: [key] });
-  }
+  const statements = chunk([...new Set(args)], MAX_ITEMS_PER_STATEMENT).map((keys) => ({
+    sql: `SELECT s.key AS key, s.value AS value FROM strings s JOIN keys k ON k.key = s.key WHERE s.key IN (${placeholders(keys.length)}) AND (k.expires_at IS NULL OR k.expires_at > unixepoch())`,
+    params: keys as unknown[],
+  }));
 
   return {
     statements,
     mapResult: (results) => {
-      const out: unknown[] = [];
-      for (let i = 0; i < args.length; i++) {
-        const res = results[i * 2 + 1];
-        if (res.length === 0) {
-          out.push(null);
-        } else {
-          out.push(rowString(res[0], "value"));
+      const values = new Map<string, string>();
+      for (const res of results) {
+        for (const row of res) {
+          values.set(rowString(row, "key"), rowString(row, "value"));
         }
       }
-      return out;
+      return args.map((key) => values.get(key) ?? null);
     },
   };
 }
@@ -375,14 +408,32 @@ export function translateMSet(args: string[]): Translation {
     throw errWrongArgs("mset");
   }
 
-  const statements: Statement[] = [];
+  // Later assignments win, matching sequential SET semantics.
+  const pairs = new Map<string, string>();
   for (let i = 0; i < args.length; i += 2) {
-    const key = args[i];
-    const value = args[i + 1];
+    pairs.set(args[i], args[i + 1]);
+  }
+
+  const statements: Statement[] = [];
+  for (const group of chunk([...pairs], MAX_ITEMS_PER_STATEMENT)) {
+    const keys = group.map(([key]) => key);
+    const values: unknown[] = [];
+    for (const [key, value] of group) {
+      values.push(key, value);
+    }
     statements.push(
-      { sql: "DELETE FROM keys WHERE key = ?", params: [key] },
-      { sql: "INSERT INTO keys (key, type) VALUES (?, 'string')", params: [key] },
-      { sql: "INSERT INTO strings (key, value) VALUES (?, ?)", params: [key, value] }
+      {
+        sql: `DELETE FROM keys WHERE key IN (${placeholders(keys.length)})`,
+        params: keys,
+      },
+      {
+        sql: `INSERT INTO keys (key, type) VALUES ${group.map(() => "(?, 'string')").join(", ")}`,
+        params: keys,
+      },
+      {
+        sql: `INSERT INTO strings (key, value) VALUES ${group.map(() => "(?, ?)").join(", ")}`,
+        params: values,
+      }
     );
   }
 
